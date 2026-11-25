@@ -91,49 +91,43 @@ const T_MAX_K = 1000;
 const T_FREEZE_K = C2K(0);
 const T_BOIL_K   = C2K(100);
 
-// ===== 3D-КАМЕРА И ПРОЕКЦИЯ (ИСПРАВЛЕНО) =====
+// ===== 3D-КАМЕРА И ПРОЕКЦИЯ =====
 let rotY = 0.6;
 let rotX = -0.15;
 
-// Центрируем проекцию по меньшей стороне экрана.
-// 0.4 — это размер куба на экране (занимает 40% от меньшей стороны).
-function screenScale(){
-  return Math.min(W, H) * 0.40; 
-}
+function screenScale(){ return Math.min(W, H) * 0.40; }
 
 function project(x, y, z){
-  // локальные координаты куба (центр в 0, размер от -0.5 до 0.5)
-  let px = x - 0.5;
-  let py = y - 0.5;
-  let pz = z - 0.5;
+  let px = x - 0.5, py = y - 0.5, pz = z - 0.5;
 
-  // Вращение вокруг Y
   const cy = Math.cos(rotY), sy_ = Math.sin(rotY);
   let rx = px * cy + pz * sy_;
   let rz = -px * sy_ + pz * cy;
   let ry = py;
 
-  // Вращение вокруг X
   const cx = Math.cos(rotX), sx_ = Math.sin(rotX);
   let ry2 = ry * cx - rz * sx_;
   let rz2 = ry * sx_ + rz * cx;
 
   const camDist = 2.5;
   const zCam = rz2 + camDist;
-
-  // Перспективное деление
   const scale = 2.5 / zCam;
+  
   const S = screenScale();
-
-  const sx = W/2 + rx * S * scale;
-  const sy = H/2 - ry2 * S * scale;
-
-  return { sx, sy, scale, zCam };
+  return { 
+    sx: W/2 + rx * S * scale, 
+    sy: H/2 - ry2 * S * scale, 
+    scale, 
+    zCam 
+  };
 }
 
 // ===== ФИЗИКА =====
 const R_GAS = 5, R_LIQ = 8;
-const VELOCITY_SCALE = 0.005;
+// ВАЖНО: Скорость и ограничители. Если VMAX2 меньше скорости термостата, газ замерзает!
+const VELOCITY_SCALE = 0.015; // Увеличил, чтобы газ летал быстрее
+const VMAX2_GAS = 0.10;       // Теперь потолок огромный, термостат сам справится
+const VMAX2_COND = 0.05;      // Для жидкости/льда поменьше
 
 const ATTR_EPS_GAS = 0.0008;
 const ATTR_RANGE_GAS = 0.08;
@@ -158,9 +152,6 @@ const G_ICE = 0.0025;
 const LIQ_DAMPING = 0.85;
 const ICE_DAMPING = 0.70;
 
-const VMAX2_GAS = 0.0030;
-const VMAX2_COND = 0.0030;
-
 const DT = 1.0;
 
 let wallT = C2K(25);
@@ -180,7 +171,8 @@ class Particle {
     this.fx=0; this.fy=0; this.fz=0;
   }
   get speed2(){ return this.vx*this.vx + this.vy*this.vy + this.vz*this.vz; }
-  get temp(){ return this.mass * this.speed2 / (2 * kB); }
+  // ВАЖНО: В 3D средняя энергия 3/2 kT, значит T = m*v^2 / (3*kB)
+  get temp(){ return this.mass * this.speed2 / (3 * kB); }
 }
 
 function gauss(mu, sigma){
@@ -299,7 +291,6 @@ function handleBoundaries(p){
   if(p.z < m){ p.z=m; if(p.state==='gas') reflectFromWall(p,0,0,1); else p.vz=Math.abs(p.vz)*0.3; }
   else if(p.z > 1-m){ p.z=1-m; if(p.state==='gas') reflectFromWall(p,0,0,-1); else p.vz=-Math.abs(p.vz)*0.3; }
   
-  // ПОЛ и ПОТОЛОК
   if(p.y < m){
     p.y = m;
     if(p.state==='gas') reflectFromWall(p,0,1,0);
@@ -334,7 +325,6 @@ function step(){
     p.vy += (p.fy/p.mass)*DT;
     p.vz += (p.fz/p.mass)*DT;
 
-    // Гравитация (вниз = к полу y=0)
     if(p.state==='gas') p.vy -= G_GAS*DT;
     else if(p.state==='liquid') p.vy -= G_LIQ*DT;
     else p.vy -= G_ICE*DT;
@@ -359,7 +349,7 @@ function step(){
     if(p.state==='gas'){
       if(wallT < T_BOIL_K){
         const cool = 1 - wallT/T_BOIL_K;
-        const hf = 1 - p.y * 0.75; // вероятность конденсации выше у пола
+        const hf = 1 - p.y * 0.75;
         if(Math.random() < 0.22*cool*hf){
           p.state='liquid'; p.r=R_LIQ; p.mass=MASS*1.4;
           p.vx*=0.2; p.vy*=0.2; p.vz*=0.2;
@@ -415,7 +405,7 @@ function step(){
   }
 }
 
-// ===== ЦВЕТ =====
+// ===== ОТРИСОВКА =====
 function gasColor(){
   const c = K2C(avgT);
   let r,g,b;
@@ -434,15 +424,12 @@ function wallColor(){
   return [r,g,b];
 }
 
-// ===== КУБ =====
 const CUBE_CORNERS = [
   [0,0,0],[1,0,0],[1,0,1],[0,0,1],
   [0,1,0],[1,1,0],[1,1,1],[0,1,1],
 ];
 const CUBE_EDGES = [
-  [0,1],[1,2],[2,3],[3,0], // пол
-  [4,5],[5,6],[6,7],[7,4], // потолок
-  [0,4],[1,5],[2,6],[3,7], // вертикали
+  [0,1],[1,2],[2,3],[3,0], [4,5],[5,6],[6,7],[7,4], [0,4],[1,5],[2,6],[3,7],
 ];
 
 function drawCube(){
@@ -462,7 +449,6 @@ function drawCube(){
     ctx.stroke();
   }
 
-  // Подписи
   const floorCenter = project(0.5, 0, 0.5);
   const ceilCenter  = project(0.5, 1, 0.5);
   ctx.font = '11px monospace';
@@ -473,7 +459,6 @@ function drawCube(){
   ctx.textAlign = 'left';
 }
 
-// ===== ЧАСТИЦЫ =====
 function drawParticles(){
   const [gr,gg,gb] = gasColor();
   const vRef = Math.sqrt(3*kB*Math.max(avgT,1)/MASS) * VELOCITY_SCALE;
@@ -514,21 +499,18 @@ function drawParticles(){
   }
 }
 
-// ===== ТЕРМОМЕТР =====
 function drawThermometer(){
   const barW = 14;
-  const barH = Math.min(H * 0.4, 280); // Сделал покороче, чтобы не лезло под HUD
+  const barH = Math.min(H * 0.4, 280);
   const barX = W - 50;
   const barY = H/2 - barH/2;
 
   const minC = -50, maxC = 300;
   const clamp = v => Math.max(minC, Math.min(maxC, v));
 
-  // Фон шкалы
   ctx.fillStyle = 'rgba(42,42,58,0.85)';
   ctx.fillRect(barX, barY, barW, barH);
 
-  // Градиент
   const grad = ctx.createLinearGradient(0, barY + barH, 0, barY);
   grad.addColorStop(0.0, '#5a7a9a');
   grad.addColorStop(0.4, '#8a8a8a');
@@ -540,12 +522,10 @@ function drawThermometer(){
   ctx.fillStyle = grad;
   ctx.fillRect(barX, barY + barH - fillH, barW, fillH);
 
-  // Обводка
   ctx.strokeStyle = 'rgba(120,120,140,0.5)';
   ctx.lineWidth = 1;
   ctx.strokeRect(barX + 0.5, barY + 0.5, barW - 1, barH - 1);
 
-  // Метки
   const marks = [-20, 0, 25, 100, 250];
   ctx.font = '10px monospace';
   ctx.textAlign = 'left';
@@ -561,7 +541,6 @@ function drawThermometer(){
     ctx.fillText(m + '°', barX - 34, y + 3);
   }
 
-  // Стрелка газа
   const gasC = K2C(avgT);
   const gFrac = (clamp(gasC) - minC) / (maxC - minC);
   const gY = barY + barH - barH * gFrac;
@@ -573,7 +552,6 @@ function drawThermometer(){
   ctx.closePath();
   ctx.fill();
 
-  // Подпись
   ctx.font = '10px monospace';
   ctx.fillStyle = 'rgba(200,200,215,0.8)';
   ctx.textAlign = 'center';
@@ -620,7 +598,6 @@ function loop(now){
 }
 requestAnimationFrame(loop);
 
-// ===== УПРАВЛЕНИЕ ТЕМПЕРАТУРОЙ =====
 const STEP_C = 5;
 document.getElementById('btnUp').addEventListener('click', () => {
   targetT = Math.min(T_MAX_K, targetT + STEP_C);
@@ -635,36 +612,26 @@ document.querySelectorAll('.preset').forEach(btn => {
   });
 });
 
-// ===== ВРАЩЕНИЕ =====
 let dragging = false;
 let lastX = 0, lastY = 0;
 
 function onDown(x, y){
-  if(y > H - 120) return; // Игнорируем нижнюю панель
+  if(y > H - 120) return;
   dragging = true;
   lastX = x; lastY = y;
 }
 function onMove(x, y){
   if(!dragging) return;
-  const dx = x - lastX;
-  const dy = y - lastY;
-  rotY += dx * 0.01;
-  rotX += dy * 0.005;
-  rotX = Math.max(-0.8, Math.min(0.8, rotX)); // Ограничиваем наклон
+  rotY += (x - lastX) * 0.01;
+  rotX += (y - lastY) * 0.005;
+  rotX = Math.max(-0.8, Math.min(0.8, rotX));
   lastX = x; lastY = y;
 }
 function onUp(){ dragging = false; }
 
-canvas.addEventListener('touchstart', e => {
-  const t = e.touches[0];
-  onDown(t.clientX, t.clientY);
-}, {passive:true});
-canvas.addEventListener('touchmove', e => {
-  const t = e.touches[0];
-  onMove(t.clientX, t.clientY);
-}, {passive:true});
+canvas.addEventListener('touchstart', e => onDown(e.touches[0].clientX, e.touches[0].clientY), {passive:true});
+canvas.addEventListener('touchmove', e => onMove(e.touches[0].clientX, e.touches[0].clientY), {passive:true});
 canvas.addEventListener('touchend', onUp, {passive:true});
-
 canvas.addEventListener('mousedown', e => onDown(e.clientX, e.clientY));
 addEventListener('mousemove', e => onMove(e.clientX, e.clientY));
 addEventListener('mouseup', onUp);
