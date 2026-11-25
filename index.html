@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
- <link rel="manifest" href="manifest.json">
+<link rel="manifest" href="manifest.json">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="theme-color" content="#0a0a14">
@@ -91,53 +91,31 @@ const T_MAX_K = 1000;
 const T_FREEZE_K = C2K(0);
 const T_BOIL_K   = C2K(100);
 
-// ===== 3D-КАМЕРА И ВРАЩЕНИЕ =====
-// Куб: x,y,z ∈ [0..1], но для вращения переводим в [-0.5..0.5]
-let rotY = 0.6;      // поворот вокруг вертикальной оси (рад)
-let rotX = -0.15;    // наклон вокруг горизонтальной (рад)
-const FOV = 2.2;     // фокусное расстояние
+// ===== 3D-КАМЕРА =====
+let rotY = 0.6;
+let rotX = -0.15;
+const FOV = 2.2;
 
-// Экранные параметры
-function screenScale(){
-  return Math.min(W, H) * 0.55;
-}
+function screenScale(){ return Math.min(W, H) * 0.55; }
 
-// Проекция: точка в кубе [0..1]^3 → экран
-// 1. Центрируем: [0..1] → [-0.5..0.5]
-// 2. Вращаем вокруг Y (rotY), затем вокруг X (rotX)
-// 3. Перспектива
 function project(x, y, z){
-  // В локальных координатах куба, центр = 0
-  let px = x - 0.5;
-  let py = y - 0.5;
-  let pz = z - 0.5;
+  let px = x - 0.5, py = y - 0.5, pz = z - 0.5;
 
-  // ВАЖНО: y=0 — пол (низ), y=1 — потолок (верх).
-  // На экране: больший y — выше (sy меньше).
-  // Мы не инвертируем здесь — сделаем при выводе sy.
-  // (py = -0.5 внизу, +0.5 вверху)
-
-  // Вращение вокруг Y
   const cy = Math.cos(rotY), sy_ = Math.sin(rotY);
   let rx = px * cy + pz * sy_;
   let rz = -px * sy_ + pz * cy;
   let ry = py;
 
-  // Вращение вокруг X
   const cx = Math.cos(rotX), sx_ = Math.sin(rotX);
   let ry2 = ry * cx - rz * sx_;
   let rz2 = ry * sx_ + rz * cx;
 
-  // Камера смотрит вдоль +Z, на расстоянии
   const camDist = 2.5;
   const zCam = rz2 + camDist;
-
-  // Перспектива
   const scale = FOV / zCam;
 
   const S = screenScale();
   const sx = W/2 + rx * S * scale;
-  // y инвертирован: больше py → выше → меньше sy
   const sy = H/2 - ry2 * S * scale;
 
   return { sx, sy, scale, zCam };
@@ -179,7 +157,8 @@ let wallT = C2K(25);
 let targetT = C2K(25);
 let particles = [];
 let nLiquid = 0, nIce = 0;
-let avgT = C2K(25);
+let avgT = C2K(25);         // температура газа (только по газу)
+let systemT = C2K(25);      // температура всей системы (газ+жидкость+лёд)
 
 class Particle {
   constructor(x, y, z, vx, vy, vz, state='gas'){
@@ -305,17 +284,14 @@ function reflectFromWall(p, nx, ny, nz){
 
 function handleBoundaries(p){
   const m = p.r/1000;
-  // x
   if(p.x < m){ p.x=m; if(p.state==='gas') reflectFromWall(p,1,0,0); else p.vx=Math.abs(p.vx)*0.3; }
   else if(p.x > 1-m){ p.x=1-m; if(p.state==='gas') reflectFromWall(p,-1,0,0); else p.vx=-Math.abs(p.vx)*0.3; }
-  // z
   if(p.z < m){ p.z=m; if(p.state==='gas') reflectFromWall(p,0,0,1); else p.vz=Math.abs(p.vz)*0.3; }
   else if(p.z > 1-m){ p.z=1-m; if(p.state==='gas') reflectFromWall(p,0,0,-1); else p.vz=-Math.abs(p.vz)*0.3; }
-  // y — пол (y=0) и потолок (y=1)
   if(p.y < m){
     p.y = m;
     if(p.state==='gas') reflectFromWall(p,0,1,0);
-    else p.vy = Math.abs(p.vy)*0.3;   // жидкость/лёд на полу
+    else p.vy = Math.abs(p.vy)*0.3;
   }
   if(p.y > 1-m){
     p.y = 1-m;
@@ -346,9 +322,9 @@ function step(){
     p.vy += (p.fy/p.mass)*DT;
     p.vz += (p.fz/p.mass)*DT;
 
-    if(p.state==='gas') p.vy -= G_GAS*DT;        // газ почти невесом
-    else if(p.state==='liquid') p.vy -= G_LIQ*DT; // жидкость падает вниз
-    else p.vy -= G_ICE*DT;                       // лёд падает ещё сильнее
+    if(p.state==='gas') p.vy -= G_GAS*DT;
+    else if(p.state==='liquid') p.vy -= G_LIQ*DT;
+    else p.vy -= G_ICE*DT;
 
     if(p.state==='liquid'){ p.vx*=LIQ_DAMPING; p.vz*=LIQ_DAMPING; }
     else if(p.state==='ice'){ p.vx*=ICE_DAMPING; p.vz*=ICE_DAMPING; }
@@ -370,8 +346,7 @@ function step(){
     if(p.state==='gas'){
       if(wallT < T_BOIL_K){
         const cool = 1 - wallT/T_BOIL_K;
-        // Вероятность выше у пола (y=0) и ниже у потолка (y=1)
-        const hf = 1 - p.y * 0.75;   // у пола 1.0, у потолка 0.25
+        const hf = 1 - p.y * 0.75;
         if(Math.random() < 0.22*cool*hf){
           p.state='liquid'; p.r=R_LIQ; p.mass=MASS*1.4;
           p.vx*=0.2; p.vy*=0.2; p.vz*=0.2;
@@ -402,17 +377,33 @@ function step(){
     }
   }
 
+  // ===== СТАТИСТИКА (ИСПРАВЛЕНО) =====
   nLiquid=0; nIce=0;
-  let sumT=0, nGas=0;
+  let sumGasT=0, nGas=0;
+  let sumAllT=0, nAll=0;
   for(const p of particles){
+    const t = p.temp;
+    sumAllT += t; nAll++;
     if(p.state==='liquid') nLiquid++;
     else if(p.state==='ice') nIce++;
-    else { sumT+=p.temp; nGas++; }
+    else { sumGasT += t; nGas++; }
   }
-  avgT = nGas>0 ? sumT/nGas : 0;
+  // Температура газа — только по газу, но если газа НЕТ — берём температуру стен
+  if(nGas > 0){
+    avgT = sumGasT / nGas;
+  } else {
+    // Газ исчез — показываем температуру стен (равновесие)
+    avgT = wallT;
+  }
+  // Температура системы — по всем частицам
+  if(nAll > 0){
+    systemT = sumAllT / nAll;
+  } else {
+    systemT = wallT;
+  }
 }
 
-// ===== ЦВЕТ =====
+// ===== ЦВЕТ ГАЗА =====
 function gasColor(){
   const c = K2C(avgT);
   let r,g,b;
@@ -422,39 +413,35 @@ function gasColor(){
   return [r,g,b];
 }
 
-// ===== КУБ (12 рёбер, 8 углов) =====
-// Углы в локальных координатах [0..1]^3.
-// y=0 — пол, y=1 — потолок.
+// ===== ЦВЕТ СТЕН =====
+function wallColor(){
+  const c = K2C(wallT);
+  let r,g,b;
+  if(c<0){ const k=Math.max(0,Math.min(1,(c+50)/50)); r=40+40*k; g=80+80*k; b=220+35*k; }
+  else if(c<100){ const k=c/100; r=80+120*k; g=160-40*k; b=255-180*k; }
+  else { const k=Math.min(1,(c-100)/200); r=200+55*k; g=120-100*k; b=75-50*k; }
+  return [r,g,b];
+}
+
+// ===== КУБ =====
 const CUBE_CORNERS = [
-  [0,0,0],[1,0,0],[1,0,1],[0,0,1],   // нижняя грань (пол)
-  [0,1,0],[1,1,0],[1,1,1],[0,1,1],   // верхняя грань (потолок)
+  [0,0,0],[1,0,0],[1,0,1],[0,0,1],
+  [0,1,0],[1,1,0],[1,1,1],[0,1,1],
 ];
-// Рёбра: пары индексов
 const CUBE_EDGES = [
-  // нижняя грань
   [0,1],[1,2],[2,3],[3,0],
-  // верхняя грань
   [4,5],[5,6],[6,7],[7,4],
-  // вертикальные
   [0,4],[1,5],[2,6],[3,7],
 ];
 
 function drawCube(){
   const p = CUBE_CORNERS.map(c => project(c[0], c[1], c[2]));
+  const [wr, wg, wb] = wallColor();
 
-  const wc = K2C(wallT);
-  let wr,wg,wb;
-  if(wc<0){ const k=Math.max(0,Math.min(1,(wc+50)/50)); wr=40+40*k; wg=80+80*k; wb=220+35*k; }
-  else if(wc<100){ const k=wc/100; wr=80+120*k; wg=160-40*k; wb=255-180*k; }
-  else { const k=Math.min(1,(wc-100)/200); wr=200+55*k; wg=120-100*k; wb=75-50*k; }
-
-  // Заливка задней грани? Нет — рисуем только рёбра.
-  // Рисуем все 12 рёбер, но с разной яркостью в зависимости от средней глубины.
   ctx.lineCap = 'round';
   for(const [i,j] of CUBE_EDGES){
     const a = p[i], b = p[j];
     const zAvg = (a.zCam + b.zCam) / 2;
-    // Чем дальше (больше zCam) — тем тусклее
     const bright = Math.max(0.35, Math.min(1, 1.4 - zAvg * 0.25));
     ctx.strokeStyle = `rgba(${wr*bright|0},${wg*bright|0},${wb*bright|0},${0.5 + 0.5*bright})`;
     ctx.lineWidth = 1.5 + bright * 1.2;
@@ -464,8 +451,6 @@ function drawCube(){
     ctx.stroke();
   }
 
-  // Подписи «ПОЛ» и «ПОТОЛОК» (опционально, для наглядности)
-  // Углы: пол — центр нижней грани, потолок — центр верхней
   const floorCenter = project(0.5, 0, 0.5);
   const ceilCenter  = project(0.5, 1, 0.5);
   ctx.font = '11px monospace';
@@ -481,7 +466,6 @@ function drawParticles(){
   const [gr,gg,gb] = gasColor();
   const vRef = Math.sqrt(3*kB*Math.max(avgT,1)/MASS) * VELOCITY_SCALE;
 
-  // Проецируем и сортируем по zCam (дальние сначала)
   const list = particles.map(p => ({ p, proj: project(p.x, p.y, p.z) }));
   list.sort((a,b) => b.proj.zCam - a.proj.zCam);
 
@@ -489,8 +473,6 @@ function drawParticles(){
     const rScreen = p.r * proj.scale * 0.35;
     if(rScreen < 0.3) continue;
 
-    // Глубина: zCam больше → дальше
-    // Нормируем: 0 = далеко, 1 = близко
     const depth = Math.max(0, Math.min(1, 1.5 - proj.zCam * 0.35));
     const bright = 0.4 + 0.6*depth;
 
@@ -520,6 +502,75 @@ function drawParticles(){
   }
 }
 
+// ===== ТЕРМОМЕТР СПРАВА (серый, ненавязчивый) =====
+function drawThermometer(){
+  const barW = 14;
+  const barH = Math.min(H * 0.55, 380);
+  const barX = W - 42;
+  const barY = H/2 - barH/2;
+
+  // Диапазон шкалы
+  const minC = -50, maxC = 300;
+  const clamp = v => Math.max(minC, Math.min(maxC, v));
+
+  // Фон шкалы
+  ctx.fillStyle = 'rgba(42,42,58,0.75)';
+  ctx.fillRect(barX, barY, barW, barH);
+
+  // Градиент заполнения: серо-голубой → серый → серо-красный
+  const grad = ctx.createLinearGradient(0, barY + barH, 0, barY);
+  grad.addColorStop(0.0, '#5a7a9a');   // холодный серо-голубой
+  grad.addColorStop(0.4, '#8a8a8a');   // нейтральный серый
+  grad.addColorStop(1.0, '#a05a5a');   // тёплый серо-красный
+
+  // Заполнение по текущей температуре СИСТЕМЫ
+  const sysC = K2C(systemT);
+  const frac = (clamp(sysC) - minC) / (maxC - minC);
+  const fillH = barH * frac;
+  ctx.fillStyle = grad;
+  ctx.fillRect(barX, barY + barH - fillH, barW, fillH);
+
+  // Обводка
+  ctx.strokeStyle = 'rgba(120,120,140,0.5)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(barX + 0.5, barY + 0.5, barW - 1, barH - 1);
+
+  // Метки
+  const marks = [-20, 0, 25, 100, 250];
+  ctx.font = '10px monospace';
+  ctx.fillStyle = 'rgba(180,180,195,0.7)';
+  ctx.textAlign = 'left';
+  for(const m of marks){
+    const f = (clamp(m) - minC) / (maxC - minC);
+    const y = barY + barH - barH * f;
+    ctx.beginPath();
+    ctx.moveTo(barX - 4, y);
+    ctx.lineTo(barX, y);
+    ctx.strokeStyle = 'rgba(180,180,195,0.4)';
+    ctx.stroke();
+    ctx.fillText(m + '°', barX - 34, y + 3);
+  }
+
+  // Стрелка текущей температуры газа (тонкая, светлая)
+  const gasC = K2C(avgT);
+  const gFrac = (clamp(gasC) - minC) / (maxC - minC);
+  const gY = barY + barH - barH * gFrac;
+  ctx.fillStyle = 'rgba(220,220,235,0.9)';
+  ctx.beginPath();
+  ctx.moveTo(barX + barW + 2, gY);
+  ctx.lineTo(barX + barW + 10, gY - 5);
+  ctx.lineTo(barX + barW + 10, gY + 5);
+  ctx.closePath();
+  ctx.fill();
+
+  // Подпись
+  ctx.font = '10px monospace';
+  ctx.fillStyle = 'rgba(200,200,215,0.8)';
+  ctx.textAlign = 'center';
+  ctx.fillText(K2C(avgT).toFixed(0) + '°', barX + barW/2, barY - 6);
+  ctx.textAlign = 'left';
+}
+
 // ===== ОТРИСОВКА =====
 function draw(){
   ctx.fillStyle = '#0a0a14';
@@ -527,14 +578,15 @@ function draw(){
 
   drawCube();
   drawParticles();
+  drawThermometer();
 
   hud.innerHTML =
     `<b>Стены:</b> ${K2C(wallT).toFixed(1)} °C<br>` +
     `<b>Газ:</b> ${K2C(avgT).toFixed(1)} °C<br>` +
+    `<b>Система:</b> ${K2C(systemT).toFixed(1)} °C<br>` +
     `<b>Газ:</b> ${particles.length - nLiquid - nIce}<br>` +
     `<b>Жидкость:</b> ${nLiquid}<br>` +
-    `<b>Лёд:</b> ${nIce}<br>` +
-    `<b>Поворот:</b> ${(rotY*180/Math.PI).toFixed(0)}°`;
+    `<b>Лёд:</b> ${nIce}`;
 
   document.getElementById('tempVal').textContent = K2C(targetT).toFixed(1) + ' °C';
   const frac = (targetT - T_MIN_K) / (T_MAX_K - T_MIN_K);
@@ -575,12 +627,11 @@ document.querySelectorAll('.preset').forEach(btn => {
   });
 });
 
-// ===== ВРАЩЕНИЕ СВАЙПОМ / МЫШЬЮ =====
+// ===== ВРАЩЕНИЕ =====
 let dragging = false;
 let lastX = 0, lastY = 0;
 
 function onDown(x, y){
-  // Не перехватываем касания по кнопкам управления
   if(y > H - 120) return;
   dragging = true;
   lastX = x; lastY = y;
@@ -591,13 +642,11 @@ function onMove(x, y){
   const dy = y - lastY;
   rotY += dx * 0.01;
   rotX += dy * 0.005;
-  // Ограничим наклон
   rotX = Math.max(-0.8, Math.min(0.8, rotX));
   lastX = x; lastY = y;
 }
 function onUp(){ dragging = false; }
 
-// Touch
 canvas.addEventListener('touchstart', e => {
   const t = e.touches[0];
   onDown(t.clientX, t.clientY);
@@ -608,7 +657,6 @@ canvas.addEventListener('touchmove', e => {
 }, {passive:true});
 canvas.addEventListener('touchend', onUp, {passive:true});
 
-// Mouse
 canvas.addEventListener('mousedown', e => onDown(e.clientX, e.clientY));
 addEventListener('mousemove', e => onMove(e.clientX, e.clientY));
 addEventListener('mouseup', onUp);
