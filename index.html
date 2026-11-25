@@ -78,12 +78,10 @@ function resize(){
 }
 addEventListener('resize', resize); resize();
 
-// ===== ЕДИНИЦЫ =====
 const K0 = 273.15;
 const K2C = K => K - K0;
 const C2K = C => C + K0;
 
-// ===== КОНСТАНТЫ =====
 const kB = 1.0;
 const MASS = 1.0;
 const T_MIN_K = 50;
@@ -91,43 +89,31 @@ const T_MAX_K = 1000;
 const T_FREEZE_K = C2K(0);
 const T_BOIL_K   = C2K(100);
 
-// ===== 3D-КАМЕРА И ПРОЕКЦИЯ =====
 let rotY = 0.6;
 let rotX = -0.15;
 
 function screenScale(){ return Math.min(W, H) * 0.40; }
-
 function project(x, y, z){
   let px = x - 0.5, py = y - 0.5, pz = z - 0.5;
-
   const cy = Math.cos(rotY), sy_ = Math.sin(rotY);
   let rx = px * cy + pz * sy_;
   let rz = -px * sy_ + pz * cy;
   let ry = py;
-
   const cx = Math.cos(rotX), sx_ = Math.sin(rotX);
   let ry2 = ry * cx - rz * sx_;
   let rz2 = ry * sx_ + rz * cx;
-
   const camDist = 2.5;
   const zCam = rz2 + camDist;
   const scale = 2.5 / zCam;
-  
   const S = screenScale();
-  return { 
-    sx: W/2 + rx * S * scale, 
-    sy: H/2 - ry2 * S * scale, 
-    scale, 
-    zCam 
-  };
+  return { sx: W/2 + rx * S * scale, sy: H/2 - ry2 * S * scale, scale, zCam };
 }
 
 // ===== ФИЗИКА =====
 const R_GAS = 5, R_LIQ = 8;
-// ВАЖНО: Скорость и ограничители. Если VMAX2 меньше скорости термостата, газ замерзает!
-const VELOCITY_SCALE = 0.015; // Увеличил, чтобы газ летал быстрее
-const VMAX2_GAS = 0.10;       // Теперь потолок огромный, термостат сам справится
-const VMAX2_COND = 0.05;      // Для жидкости/льда поменьше
+const VELOCITY_SCALE = 0.015;
+const VMAX2_GAS = 0.10;
+const VMAX2_COND = 0.05;
 
 const ATTR_EPS_GAS = 0.0008;
 const ATTR_RANGE_GAS = 0.08;
@@ -151,7 +137,6 @@ const G_ICE = 0.0025;
 
 const LIQ_DAMPING = 0.85;
 const ICE_DAMPING = 0.70;
-
 const DT = 1.0;
 
 let wallT = C2K(25);
@@ -171,8 +156,11 @@ class Particle {
     this.fx=0; this.fy=0; this.fz=0;
   }
   get speed2(){ return this.vx*this.vx + this.vy*this.vy + this.vz*this.vz; }
-  // ВАЖНО: В 3D средняя энергия 3/2 kT, значит T = m*v^2 / (3*kB)
-  get temp(){ return this.mass * this.speed2 / (3 * kB); }
+  get temp(){ 
+    // Защита от NaN
+    if(!isFinite(this.speed2)) return 0;
+    return this.mass * this.speed2 / (3 * kB); 
+  }
 }
 
 function gauss(mu, sigma){
@@ -186,14 +174,20 @@ function maxwellV(T, mass){
 function spawnParticles(n){
   particles = [];
   const s = VELOCITY_SCALE;
+  const T = C2K(25);
   for(let i=0; i<n; i++){
+    // Даём частицам гарантированно ненулевую скорость (не NaN)
+    const vx = maxwellV(T, MASS) * s;
+    const vy = maxwellV(T, MASS) * s;
+    const vz = maxwellV(T, MASS) * s;
+    
     particles.push(new Particle(
       0.1 + Math.random()*0.8,
       0.1 + Math.random()*0.8,
       0.1 + Math.random()*0.8,
-      maxwellV(C2K(25), MASS)*s,
-      maxwellV(C2K(25), MASS)*s,
-      maxwellV(C2K(25), MASS)*s,
+      isFinite(vx) ? vx : 0.01,
+      isFinite(vy) ? vy : 0.01,
+      isFinite(vz) ? vz : 0.01,
       'gas'
     ));
   }
@@ -247,6 +241,7 @@ function computeForces(){
 function exchangeHeat(a, b){
   if(a.state!=='gas' && b.state!=='gas') return;
   const Ea = a.mass*a.speed2, Eb = b.mass*b.speed2;
+  if(!isFinite(Ea) || !isFinite(Eb)) return;
   const Eavg = (Ea+Eb)*0.5;
   const E_target = 3*kB*wallT*VELOCITY_SCALE*VELOCITY_SCALE;
   let na = Ea + (Eavg-Ea)*THERMAL_TRANSFER;
@@ -258,13 +253,24 @@ function exchangeHeat(a, b){
 
 function applyThermostat(){
   let sum=0, cnt=0;
-  for(const p of particles){ if(p.state==='gas'){ sum+=p.speed2; cnt++; } }
-  if(cnt===0||sum<1e-15) return;
+  for(const p of particles){ if(p.state==='gas' && isFinite(p.speed2)){ sum+=p.speed2; cnt++; } }
+  if(cnt===0 || sum<1e-15) return;
+  
   const avg2 = sum/cnt;
   const target2 = 3*kB*wallT*VELOCITY_SCALE*VELOCITY_SCALE/MASS;
-  const lambda = Math.sqrt(1 + THERMOSTAT_STRENGTH*(target2/avg2 - 1));
+  
+  // ЗАЩИТА ОТ NaN И ОТРИЦАТЕЛЬНОГО КОРНЯ
+  let ratio = target2/avg2;
+  if(!isFinite(ratio) || ratio < 0) ratio = 1;
+  
+  let lambda = Math.sqrt(1 + THERMOSTAT_STRENGTH*(ratio - 1));
+  if(!isFinite(lambda)) lambda = 1;
+  lambda = Math.max(0.8, Math.min(1.2, lambda)); // Не даём прыгнуть больше чем на 20%
+
   for(const p of particles){
-    if(p.state==='gas'){ p.vx*=lambda; p.vy*=lambda; p.vz*=lambda; }
+    if(p.state==='gas'){ 
+      p.vx*=lambda; p.vy*=lambda; p.vz*=lambda; 
+    }
   }
 }
 
@@ -332,9 +338,14 @@ function step(){
     if(p.state==='liquid'){ p.vx*=LIQ_DAMPING; p.vz*=LIQ_DAMPING; }
     else if(p.state==='ice'){ p.vx*=ICE_DAMPING; p.vz*=ICE_DAMPING; }
 
+    // Ограничитель
     const v2 = p.speed2;
-    const vm2 = p.state==='gas' ? VMAX2_GAS : VMAX2_COND;
-    if(v2>vm2){ const s=Math.sqrt(vm2/v2); p.vx*=s; p.vy*=s; p.vz*=s; }
+    if(!isFinite(v2) || v2 > 1.0) { // 1.0 — это огромный потолок, просто защита от взрыва
+      const s = 0.01; // Сбрасываем скорость
+      p.vx = (Math.random()-0.5)*s; 
+      p.vy = (Math.random()-0.5)*s; 
+      p.vz = (Math.random()-0.5)*s;
+    }
 
     p.x += p.vx*DT;
     p.y += p.vy*DT;
@@ -386,6 +397,7 @@ function step(){
   let sumAllT=0, nAll=0;
   for(const p of particles){
     const t = p.temp;
+    if(!isFinite(t)) continue;
     sumAllT += t; nAll++;
     if(p.state==='liquid') nLiquid++;
     else if(p.state==='ice') nIce++;
@@ -395,7 +407,7 @@ function step(){
   if(nGas > 0){
     avgT = sumGasT / nGas;
   } else {
-    avgT = wallT; // если газа нет, показываем температуру стен
+    avgT = wallT;
   }
   
   if(nAll > 0){
