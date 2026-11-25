@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-<link rel="manifest" href="manifest.json">
+ <link rel="manifest" href="manifest.json">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="theme-color" content="#0a0a14">
@@ -91,30 +91,40 @@ const T_MAX_K = 1000;
 const T_FREEZE_K = C2K(0);
 const T_BOIL_K   = C2K(100);
 
-// ===== 3D-КАМЕРА =====
+// ===== 3D-КАМЕРА И ПРОЕКЦИЯ (ИСПРАВЛЕНО) =====
 let rotY = 0.6;
 let rotX = -0.15;
-const FOV = 2.2;
 
-function screenScale(){ return Math.min(W, H) * 0.55; }
+// Центрируем проекцию по меньшей стороне экрана.
+// 0.4 — это размер куба на экране (занимает 40% от меньшей стороны).
+function screenScale(){
+  return Math.min(W, H) * 0.40; 
+}
 
 function project(x, y, z){
-  let px = x - 0.5, py = y - 0.5, pz = z - 0.5;
+  // локальные координаты куба (центр в 0, размер от -0.5 до 0.5)
+  let px = x - 0.5;
+  let py = y - 0.5;
+  let pz = z - 0.5;
 
+  // Вращение вокруг Y
   const cy = Math.cos(rotY), sy_ = Math.sin(rotY);
   let rx = px * cy + pz * sy_;
   let rz = -px * sy_ + pz * cy;
   let ry = py;
 
+  // Вращение вокруг X
   const cx = Math.cos(rotX), sx_ = Math.sin(rotX);
   let ry2 = ry * cx - rz * sx_;
   let rz2 = ry * sx_ + rz * cx;
 
   const camDist = 2.5;
   const zCam = rz2 + camDist;
-  const scale = FOV / zCam;
 
+  // Перспективное деление
+  const scale = 2.5 / zCam;
   const S = screenScale();
+
   const sx = W/2 + rx * S * scale;
   const sy = H/2 - ry2 * S * scale;
 
@@ -157,8 +167,8 @@ let wallT = C2K(25);
 let targetT = C2K(25);
 let particles = [];
 let nLiquid = 0, nIce = 0;
-let avgT = C2K(25);         // температура газа (только по газу)
-let systemT = C2K(25);      // температура всей системы (газ+жидкость+лёд)
+let avgT = C2K(25);
+let systemT = C2K(25);
 
 class Particle {
   constructor(x, y, z, vx, vy, vz, state='gas'){
@@ -288,6 +298,8 @@ function handleBoundaries(p){
   else if(p.x > 1-m){ p.x=1-m; if(p.state==='gas') reflectFromWall(p,-1,0,0); else p.vx=-Math.abs(p.vx)*0.3; }
   if(p.z < m){ p.z=m; if(p.state==='gas') reflectFromWall(p,0,0,1); else p.vz=Math.abs(p.vz)*0.3; }
   else if(p.z > 1-m){ p.z=1-m; if(p.state==='gas') reflectFromWall(p,0,0,-1); else p.vz=-Math.abs(p.vz)*0.3; }
+  
+  // ПОЛ и ПОТОЛОК
   if(p.y < m){
     p.y = m;
     if(p.state==='gas') reflectFromWall(p,0,1,0);
@@ -322,6 +334,7 @@ function step(){
     p.vy += (p.fy/p.mass)*DT;
     p.vz += (p.fz/p.mass)*DT;
 
+    // Гравитация (вниз = к полу y=0)
     if(p.state==='gas') p.vy -= G_GAS*DT;
     else if(p.state==='liquid') p.vy -= G_LIQ*DT;
     else p.vy -= G_ICE*DT;
@@ -346,7 +359,7 @@ function step(){
     if(p.state==='gas'){
       if(wallT < T_BOIL_K){
         const cool = 1 - wallT/T_BOIL_K;
-        const hf = 1 - p.y * 0.75;
+        const hf = 1 - p.y * 0.75; // вероятность конденсации выше у пола
         if(Math.random() < 0.22*cool*hf){
           p.state='liquid'; p.r=R_LIQ; p.mass=MASS*1.4;
           p.vx*=0.2; p.vy*=0.2; p.vz*=0.2;
@@ -377,7 +390,7 @@ function step(){
     }
   }
 
-  // ===== СТАТИСТИКА (ИСПРАВЛЕНО) =====
+  // ===== СТАТИСТИКА =====
   nLiquid=0; nIce=0;
   let sumGasT=0, nGas=0;
   let sumAllT=0, nAll=0;
@@ -388,14 +401,13 @@ function step(){
     else if(p.state==='ice') nIce++;
     else { sumGasT += t; nGas++; }
   }
-  // Температура газа — только по газу, но если газа НЕТ — берём температуру стен
+  
   if(nGas > 0){
     avgT = sumGasT / nGas;
   } else {
-    // Газ исчез — показываем температуру стен (равновесие)
-    avgT = wallT;
+    avgT = wallT; // если газа нет, показываем температуру стен
   }
-  // Температура системы — по всем частицам
+  
   if(nAll > 0){
     systemT = sumAllT / nAll;
   } else {
@@ -403,7 +415,7 @@ function step(){
   }
 }
 
-// ===== ЦВЕТ ГАЗА =====
+// ===== ЦВЕТ =====
 function gasColor(){
   const c = K2C(avgT);
   let r,g,b;
@@ -413,7 +425,6 @@ function gasColor(){
   return [r,g,b];
 }
 
-// ===== ЦВЕТ СТЕН =====
 function wallColor(){
   const c = K2C(wallT);
   let r,g,b;
@@ -429,9 +440,9 @@ const CUBE_CORNERS = [
   [0,1,0],[1,1,0],[1,1,1],[0,1,1],
 ];
 const CUBE_EDGES = [
-  [0,1],[1,2],[2,3],[3,0],
-  [4,5],[5,6],[6,7],[7,4],
-  [0,4],[1,5],[2,6],[3,7],
+  [0,1],[1,2],[2,3],[3,0], // пол
+  [4,5],[5,6],[6,7],[7,4], // потолок
+  [0,4],[1,5],[2,6],[3,7], // вертикали
 ];
 
 function drawCube(){
@@ -451,13 +462,14 @@ function drawCube(){
     ctx.stroke();
   }
 
+  // Подписи
   const floorCenter = project(0.5, 0, 0.5);
   const ceilCenter  = project(0.5, 1, 0.5);
   ctx.font = '11px monospace';
-  ctx.fillStyle = 'rgba(200,220,255,0.5)';
+  ctx.fillStyle = 'rgba(200,220,255,0.4)';
   ctx.textAlign = 'center';
-  ctx.fillText('ПОЛ', floorCenter.sx, floorCenter.sy + 14);
-  ctx.fillText('ПОТОЛОК', ceilCenter.sx, ceilCenter.sy - 8);
+  ctx.fillText('ПОЛ', floorCenter.sx, floorCenter.sy + 20);
+  ctx.fillText('ПОТОЛОК', ceilCenter.sx, ceilCenter.sy - 15);
   ctx.textAlign = 'left';
 }
 
@@ -502,28 +514,26 @@ function drawParticles(){
   }
 }
 
-// ===== ТЕРМОМЕТР СПРАВА (серый, ненавязчивый) =====
+// ===== ТЕРМОМЕТР =====
 function drawThermometer(){
   const barW = 14;
-  const barH = Math.min(H * 0.55, 380);
-  const barX = W - 42;
+  const barH = Math.min(H * 0.4, 280); // Сделал покороче, чтобы не лезло под HUD
+  const barX = W - 50;
   const barY = H/2 - barH/2;
 
-  // Диапазон шкалы
   const minC = -50, maxC = 300;
   const clamp = v => Math.max(minC, Math.min(maxC, v));
 
   // Фон шкалы
-  ctx.fillStyle = 'rgba(42,42,58,0.75)';
+  ctx.fillStyle = 'rgba(42,42,58,0.85)';
   ctx.fillRect(barX, barY, barW, barH);
 
-  // Градиент заполнения: серо-голубой → серый → серо-красный
+  // Градиент
   const grad = ctx.createLinearGradient(0, barY + barH, 0, barY);
-  grad.addColorStop(0.0, '#5a7a9a');   // холодный серо-голубой
-  grad.addColorStop(0.4, '#8a8a8a');   // нейтральный серый
-  grad.addColorStop(1.0, '#a05a5a');   // тёплый серо-красный
+  grad.addColorStop(0.0, '#5a7a9a');
+  grad.addColorStop(0.4, '#8a8a8a');
+  grad.addColorStop(1.0, '#a05a5a');
 
-  // Заполнение по текущей температуре СИСТЕМЫ
   const sysC = K2C(systemT);
   const frac = (clamp(sysC) - minC) / (maxC - minC);
   const fillH = barH * frac;
@@ -538,7 +548,6 @@ function drawThermometer(){
   // Метки
   const marks = [-20, 0, 25, 100, 250];
   ctx.font = '10px monospace';
-  ctx.fillStyle = 'rgba(180,180,195,0.7)';
   ctx.textAlign = 'left';
   for(const m of marks){
     const f = (clamp(m) - minC) / (maxC - minC);
@@ -548,10 +557,11 @@ function drawThermometer(){
     ctx.lineTo(barX, y);
     ctx.strokeStyle = 'rgba(180,180,195,0.4)';
     ctx.stroke();
+    ctx.fillStyle = 'rgba(180,180,195,0.8)';
     ctx.fillText(m + '°', barX - 34, y + 3);
   }
 
-  // Стрелка текущей температуры газа (тонкая, светлая)
+  // Стрелка газа
   const gasC = K2C(avgT);
   const gFrac = (clamp(gasC) - minC) / (maxC - minC);
   const gY = barY + barH - barH * gFrac;
@@ -567,11 +577,10 @@ function drawThermometer(){
   ctx.font = '10px monospace';
   ctx.fillStyle = 'rgba(200,200,215,0.8)';
   ctx.textAlign = 'center';
-  ctx.fillText(K2C(avgT).toFixed(0) + '°', barX + barW/2, barY - 6);
+  ctx.fillText(K2C(avgT).toFixed(0) + '°', barX + barW/2, barY - 8);
   ctx.textAlign = 'left';
 }
 
-// ===== ОТРИСОВКА =====
 function draw(){
   ctx.fillStyle = '#0a0a14';
   ctx.fillRect(0, 0, W, H);
@@ -593,7 +602,6 @@ function draw(){
   document.getElementById('tempFill').style.width = (Math.max(0,Math.min(1,frac))*100) + '%';
 }
 
-// ===== ЦИКЛ =====
 let lastTime = performance.now();
 let acc = 0;
 const FIXED_DT = 1000/60;
@@ -632,7 +640,7 @@ let dragging = false;
 let lastX = 0, lastY = 0;
 
 function onDown(x, y){
-  if(y > H - 120) return;
+  if(y > H - 120) return; // Игнорируем нижнюю панель
   dragging = true;
   lastX = x; lastY = y;
 }
@@ -642,7 +650,7 @@ function onMove(x, y){
   const dy = y - lastY;
   rotY += dx * 0.01;
   rotX += dy * 0.005;
-  rotX = Math.max(-0.8, Math.min(0.8, rotX));
+  rotX = Math.max(-0.8, Math.min(0.8, rotX)); // Ограничиваем наклон
   lastX = x; lastY = y;
 }
 function onUp(){ dragging = false; }
