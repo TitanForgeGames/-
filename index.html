@@ -5,7 +5,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="theme-color" content="#0a0a14">
-<title>Симуляция газа и воды</title>
+<title>Газ 3D</title>
 <style>
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   html,body{margin:0;padding:0;background:#0a0a14;overflow:hidden;
@@ -67,257 +67,221 @@
 
 <script>
 'use strict';
-// ============ ПАРАМЕТРЫ ============
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 const hud = document.getElementById('hud');
 
-let W, H, WALL = 10;
+let W, H;
 function resize(){
   W = canvas.width = innerWidth;
   H = canvas.height = innerHeight;
-  WALL = Math.max(8, Math.round(Math.min(W, H) * 0.015));
 }
 addEventListener('resize', resize); resize();
 
-// ============ ПЕРЕВОД ЕДИНИЦ ============
 const K0 = 273.15;
-const K2C = (K) => K - K0;
-const C2K = (C) => C + K0;
+const K2C = K => K - K0;
+const C2K = C => C + K0;
 
-// Константы
 const kB = 1.0;
-const R_GAS = 5;
-const R_LIQ = 8;
 const MASS = 1.0;
+const T_MIN_K = 50;
+const T_MAX_K = 1000;
+const T_FREEZE_K = C2K(0);
+const T_BOIL_K   = C2K(100);
 
-// Температуры — ВНУТРИ в кельвинах
-const T_MIN_K = 50;     // -223 °C (нижний предел)
-const T_MAX_K = 1000;   // +727 °C (верхний предел)
+// ===== 3D-ПРОЕКЦИЯ (простая, надёжная) =====
+// x,y,z ∈ [0..1]. z=0 — далеко, z=1 — близко.
+function project(x, y, z){
+  const scale = 0.45 + z * 0.75;      // 0.45 .. 1.20 — всегда > 0
+  const cx = (x - 0.5) * 2;           // -1..1
+  const cy = (y - 0.5) * 2;           // -1..1
+  const sx = W/2 + cx * (W * 0.38) * scale;
+  const sy = H/2 - cy * (H * 0.38) * scale;
+  return { sx, sy, scale };
+}
 
-// Пороги в кельвинах, но с привязкой к °C
-const T_FREEZE_K = C2K(0);     // 0 °C — замерзание/таяние
-const T_BOIL_K   = C2K(100);   // 100 °C — кипение/конденсация
+// ===== ФИЗИКА (в норм. координатах [0..1]) =====
+const R_GAS = 5, R_LIQ = 8;
+const VELOCITY_SCALE = 0.005;
 
-// ---- Силы газа ----
-const ATTR_EPS_GAS = 0.08;
-const ATTR_RANGE_GAS = R_GAS * 2.5;
-const REPULSE_K_GAS = 0.20;
-const MAX_ATTR_FORCE_GAS = 0.6;
-const MAX_REPULSE_FORCE_GAS = 1.0;
+// Силы
+const ATTR_EPS_GAS = 0.0008;
+const ATTR_RANGE_GAS = 0.08;
+const REPULSE_K_GAS = 0.004;
+const MAX_ATTR_FORCE_GAS = 0.002;
+const MAX_REPULSE_FORCE_GAS = 0.003;
 
-// ---- Силы жидкости/льда ----
-const ATTR_EPS_LIQ = 0.8;
-const ATTR_RANGE_LIQ = R_LIQ * 3.0;
-const REPULSE_K_LIQ = 2.0;
-const MAX_ATTR_FORCE_LIQ = 2.5;
-const MAX_REPULSE_FORCE_LIQ = 6.0;
+const ATTR_EPS_LIQ = 0.008;
+const ATTR_RANGE_LIQ = 0.10;
+const REPULSE_K_LIQ = 0.02;
+const MAX_ATTR_FORCE_LIQ = 0.01;
+const MAX_REPULSE_FORCE_LIQ = 0.02;
 
-// ---- Теплообмен ----
-const WALL_CONDUCTIVITY = 0.08;
+const WALL_CONDUCTIVITY = 0.10;
 const THERMAL_TRANSFER = 0.20;
-const THERMOSTAT_STRENGTH = 0.05;
+const THERMOSTAT_STRENGTH = 0.06;
 
-// ---- Гравитация ----
-const G_GAS = 0.015;
-const G_LIQ = 0.45;
-const G_ICE = 0.55;
+const G_GAS = 0.00008;
+const G_LIQ = 0.0020;
+const G_ICE = 0.0025;
 
-// ---- Вязкость ----
-const LIQ_VX_DAMPING = 0.85;
-const ICE_VX_DAMPING = 0.70;
+const LIQ_DAMPING = 0.85;
+const ICE_DAMPING = 0.70;
 
-// ---- Терминальные скорости ----
-const VY_MAX_LIQ = 9.0;
-const VY_MAX_ICE = 10.0;
-
-// ---- Ограничение скорости газа ----
-const VMAX2_GAS = 400;
-const VMAX2_COND = 400;
+const VMAX2_GAS = 0.0030;
+const VMAX2_COND = 0.0030;
 
 const DT = 1.0;
 
-// Состояния — в кельвинах
-let wallT = C2K(25);     // 25 °C
-let targetT = C2K(25);   // 25 °C
+let wallT = C2K(25);
+let targetT = C2K(25);
 let particles = [];
-let nLiquid = 0;
-let nIce = 0;
+let nLiquid = 0, nIce = 0;
 let avgT = C2K(25);
 
-// ============ ЧАСТИЦА ============
 class Particle {
-  constructor(x, y, vx, vy, state='gas'){
-    this.x = x; this.y = y;
-    this.vx = vx; this.vy = vy;
-    this.state = state;
-    this.r = state === 'gas' ? R_GAS : R_LIQ;
-    this.mass = MASS * (state === 'gas' ? 1 : 1.4);
-    this.fx = 0; this.fy = 0;
+  constructor(x, y, z, vx, vy, vz, state='gas'){
+    this.x=x; this.y=y; this.z=z;
+    this.vx=vx; this.vy=vy; this.vz=vz;
+    this.state=state;
+    this.r = state==='gas' ? R_GAS : R_LIQ;
+    this.mass = MASS * (state==='gas' ? 1 : 1.4);
+    this.fx=0; this.fy=0; this.fz=0;
   }
-  get speed2(){ return this.vx*this.vx + this.vy*this.vy; }
+  get speed2(){ return this.vx*this.vx + this.vy*this.vy + this.vz*this.vz; }
   get temp(){ return this.mass * this.speed2 / (2 * kB); }
 }
 
-// ============ МАКСВЕЛЛ ============
-function maxwellV(T, mass){
-  const sigma = Math.sqrt(kB * T / mass);
-  return gauss(0, sigma);
-}
 function gauss(mu, sigma){
   const u1 = Math.random() || 1e-9, u2 = Math.random();
   return mu + sigma * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
 }
+function maxwellV(T, mass){
+  return gauss(0, Math.sqrt(kB * T / mass));
+}
 
-// ============ СПАВН ============
 function spawnParticles(n){
   particles = [];
-  const L = WALL + R_GAS, R = W - WALL - R_GAS;
-  const T = WALL + R_GAS, B = H - WALL - R_GAS;
+  const s = VELOCITY_SCALE;
   for(let i=0; i<n; i++){
     particles.push(new Particle(
-      L + Math.random() * (R - L),
-      T + Math.random() * (B - T),
-      maxwellV(C2K(25), MASS), maxwellV(C2K(25), MASS), 'gas'
+      0.1 + Math.random()*0.8,
+      0.1 + Math.random()*0.8,
+      0.1 + Math.random()*0.8,
+      maxwellV(C2K(25), MASS)*s,
+      maxwellV(C2K(25), MASS)*s,
+      maxwellV(C2K(25), MASS)*s,
+      'gas'
     ));
   }
 }
-spawnParticles(180);
+spawnParticles(140);
 
-// ============ СИЛЫ ============
 function computeForces(){
   const n = particles.length;
-  for(let i=0; i<n; i++){ particles[i].fx = 0; particles[i].fy = 0; }
-
+  for(let i=0; i<n; i++){ 
+    particles[i].fx=0; particles[i].fy=0; particles[i].fz=0;
+  }
   for(let i=0; i<n; i++){
     const a = particles[i];
     const aCond = a.state !== 'gas';
-
     for(let j=i+1; j<n; j++){
       const b = particles[j];
       const bCond = b.state !== 'gas';
       const condensed = aCond || bCond;
 
-      const attrEps = condensed ? ATTR_EPS_LIQ : ATTR_EPS_GAS;
+      const attrEps   = condensed ? ATTR_EPS_LIQ   : ATTR_EPS_GAS;
       const attrRange = condensed ? ATTR_RANGE_LIQ : ATTR_RANGE_GAS;
-      const repK = condensed ? REPULSE_K_LIQ : REPULSE_K_GAS;
-      const maxAttr = condensed ? MAX_ATTR_FORCE_LIQ : MAX_ATTR_FORCE_GAS;
-      const maxRep = condensed ? MAX_REPULSE_FORCE_LIQ : MAX_REPULSE_FORCE_GAS;
+      const repK      = condensed ? REPULSE_K_LIQ  : REPULSE_K_GAS;
+      const maxAttr   = condensed ? MAX_ATTR_FORCE_LIQ : MAX_ATTR_FORCE_GAS;
+      const maxRep    = condensed ? MAX_REPULSE_FORCE_LIQ : MAX_REPULSE_FORCE_GAS;
 
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const d2 = dx*dx + dy*dy;
-      const range2 = attrRange * attrRange;
-      if(d2 < 1e-6 || d2 > range2) continue;
+      const dx=b.x-a.x, dy=b.y-a.y, dz=b.z-a.z;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      if(d2 < 1e-12 || d2 > attrRange*attrRange) continue;
 
       const d = Math.sqrt(d2);
-      const contact = a.r + b.r;
-      let fTotal = 0;
-
+      const contact = (a.r + b.r) / 1000;
+      let f = 0;
       if(d < contact){
-        fTotal += Math.min(maxRep, repK * (contact - d));
+        f += Math.min(maxRep, repK * (contact - d));
       }
-
       if(d > contact){
-        const sigma = contact;
-        const sr2 = (sigma*sigma) / d2;
+        const sr2 = (contact*contact) / d2;
         const sr6 = sr2*sr2*sr2;
         const sr12 = sr6*sr6;
         let fLJ = 24 * attrEps / d * (2*sr12 - sr6);
         if(fLJ < -maxAttr) fLJ = -maxAttr;
         if(fLJ >  maxAttr) fLJ =  maxAttr;
-        fTotal += fLJ;
+        f += fLJ;
       }
-
-      if(Math.abs(fTotal) < 1e-6) continue;
-      const nx = dx / d, ny = dy / d;
-      a.fx -= fTotal * nx;  a.fy -= fTotal * ny;
-      b.fx += fTotal * nx;  b.fy += fTotal * ny;
+      if(Math.abs(f) < 1e-14) continue;
+      const nx=dx/d, ny=dy/d, nz=dz/d;
+      a.fx -= f*nx; a.fy -= f*ny; a.fz -= f*nz;
+      b.fx += f*nx; b.fy += f*ny; b.fz += f*nz;
     }
   }
 }
 
-// ============ ТЕПЛООБМЕН ============
 function exchangeHeat(a, b){
   if(a.state !== 'gas' && b.state !== 'gas') return;
   const Ea = a.mass * a.speed2;
   const Eb = b.mass * b.speed2;
   const Eavg = (Ea + Eb) * 0.5;
-  const E_target = 2 * kB * wallT;
+  const E_target = 3 * kB * wallT * VELOCITY_SCALE * VELOCITY_SCALE;
   let na = Ea + (Eavg - Ea) * THERMAL_TRANSFER;
   let nb = Eb + (Eavg - Eb) * THERMAL_TRANSFER;
   if(Eavg > E_target * 1.05){
-    const cool = 0.02;
-    na *= (1 - cool);
-    nb *= (1 - cool);
+    na *= 0.98; nb *= 0.98;
   }
-  if(Ea > 1e-12){ const s = Math.sqrt(na / Ea); a.vx *= s; a.vy *= s; }
-  if(Eb > 1e-12){ const s = Math.sqrt(nb / Eb); b.vx *= s; b.vy *= s; }
+  if(Ea > 1e-15){ const s = Math.sqrt(na/Ea); a.vx*=s; a.vy*=s; a.vz*=s; }
+  if(Eb > 1e-15){ const s = Math.sqrt(nb/Eb); b.vx*=s; b.vy*=s; b.vz*=s; }
 }
 
-// ============ ТЕРМОСТАТ ============
 function applyThermostat(){
-  let sum = 0, cnt = 0;
+  let sum=0, cnt=0;
+  for(const p of particles){ if(p.state==='gas'){ sum+=p.speed2; cnt++; } }
+  if(cnt===0 || sum<1e-15) return;
+  const avg2 = sum/cnt;
+  const target2 = 3 * kB * wallT * VELOCITY_SCALE * VELOCITY_SCALE / MASS;
+  const lambda = Math.sqrt(1 + THERMOSTAT_STRENGTH * (target2/avg2 - 1));
   for(const p of particles){
-    if(p.state === 'gas'){ sum += p.speed2; cnt++; }
-  }
-  if(cnt === 0 || sum < 1e-9) return;
-  const avgSpeed2 = sum / cnt;
-  const targetSpeed2 = 2 * kB * wallT / MASS;
-  const lambda = Math.sqrt(1 + THERMOSTAT_STRENGTH * (targetSpeed2 / avgSpeed2 - 1));
-  for(const p of particles){
-    if(p.state === 'gas'){
-      p.vx *= lambda;
-      p.vy *= lambda;
-    }
+    if(p.state==='gas'){ p.vx*=lambda; p.vy*=lambda; p.vz*=lambda; }
   }
 }
 
-// ============ СТЕНЫ И ПОЛ ============
-function handleBoundaries(p){
-  const L = WALL + p.r;
-  const R = W - WALL - p.r;
-  const T = WALL + p.r;
-  const B = H - WALL - p.r;
-
-  if(p.x < L){
-    p.x = L;
-    if(p.state === 'gas') reflectFromWall(p, 1, 0);
-    else p.vx = Math.abs(p.vx) * 0.3;
-  } else if(p.x > R){
-    p.x = R;
-    if(p.state === 'gas') reflectFromWall(p, -1, 0);
-    else p.vx = -Math.abs(p.vx) * 0.3;
-  }
-  if(p.y < T){
-    p.y = T;
-    if(p.state === 'gas') reflectFromWall(p, 0, 1);
-    else p.vy = Math.abs(p.vy) * 0.3;
-  }
-  if(p.y > B){
-    p.y = B;
-    if(p.state === 'gas'){
-      reflectFromWall(p, 0, -1);
-    } else {
-      p.vy = -Math.abs(p.vy) * 0.05;
-      p.vx *= 0.85;
-    }
-  }
-}
-
-function reflectFromWall(p, nx, ny){
-  const vn = p.vx * nx + p.vy * ny;
-  const vt = -p.vx * ny + p.vy * nx;
+function reflectFromWall(p, nx, ny, nz){
+  const vn = p.vx*nx + p.vy*ny + p.vz*nz;
+  const tx = p.vx - vn*nx;
+  const ty = p.vy - vn*ny;
+  const tz = p.vz - vn*nz;
   const vnNew = -vn;
-  const vtNew = vt + (maxwellV(wallT, p.mass) - vt) * WALL_CONDUCTIVITY;
-  p.vx = vnNew * nx - vtNew * ny;
-  p.vy = vnNew * ny + vtNew * nx;
+  const tMag = Math.sqrt(tx*tx+ty*ty+tz*tz);
+  const targetT = Math.abs(maxwellV(wallT, p.mass)) * VELOCITY_SCALE;
+  const tNewMag = tMag + (targetT - tMag) * WALL_CONDUCTIVITY;
+  let k = 1;
+  if(tMag > 1e-15) k = tNewMag / tMag;
+  p.vx = vnNew*nx + tx*k;
+  p.vy = vnNew*ny + ty*k;
+  p.vz = vnNew*nz + tz*k;
 }
 
-// ============ ШАГ ============
+function handleBoundaries(p){
+  const m = p.r / 1000;
+  if(p.x < m){ p.x = m; if(p.state==='gas') reflectFromWall(p,1,0,0); else p.vx = Math.abs(p.vx)*0.3; }
+  else if(p.x > 1-m){ p.x = 1-m; if(p.state==='gas') reflectFromWall(p,-1,0,0); else p.vx = -Math.abs(p.vx)*0.3; }
+  if(p.z < m){ p.z = m; if(p.state==='gas') reflectFromWall(p,0,0,1); else p.vz = Math.abs(p.vz)*0.3; }
+  else if(p.z > 1-m){ p.z = 1-m; if(p.state==='gas') reflectFromWall(p,0,0,-1); else p.vz = -Math.abs(p.vz)*0.3; }
+  if(p.y < m){ p.y = m; if(p.state==='gas') reflectFromWall(p,0,1,0); else p.vy = Math.abs(p.vy)*0.3; }
+  if(p.y > 1-m){
+    p.y = 1-m;
+    if(p.state==='gas') reflectFromWall(p,0,-1,0);
+    else { p.vy = -Math.abs(p.vy)*0.05; p.vx*=0.85; p.vz*=0.85; }
+  }
+}
+
 function step(){
   wallT += (targetT - wallT) * 0.05;
-
   computeForces();
 
   const n = particles.length;
@@ -325,196 +289,205 @@ function step(){
     const a = particles[i];
     for(let j=i+1; j<n; j++){
       const b = particles[j];
-      if(a.state !== 'gas' && b.state !== 'gas') continue;
-      const dx = b.x - a.x, dy = b.y - a.y;
-      const d2 = dx*dx + dy*dy;
-      const contact = (a.r + b.r) * 1.4;
-      if(d2 < contact*contact && d2 > 1e-6){
-        exchangeHeat(a, b);
-      }
+      if(a.state!=='gas' && b.state!=='gas') continue;
+      const dx=b.x-a.x, dy=b.y-a.y, dz=b.z-a.z;
+      const d2 = dx*dx+dy*dy+dz*dz;
+      const contact = (a.r+b.r)/1000 * 1.4;
+      if(d2 < contact*contact && d2 > 1e-12) exchangeHeat(a,b);
     }
   }
 
   for(const p of particles){
-    p.vx += (p.fx / p.mass) * DT;
-    p.vy += (p.fy / p.mass) * DT;
+    p.vx += (p.fx/p.mass) * DT;
+    p.vy += (p.fy/p.mass) * DT;
+    p.vz += (p.fz/p.mass) * DT;
 
-    if(p.state === 'gas') p.vy += G_GAS * DT;
-    else if(p.state === 'liquid') p.vy += G_LIQ * DT;
-    else p.vy += G_ICE * DT;
+    if(p.state==='gas') p.vy += G_GAS*DT;
+    else if(p.state==='liquid') p.vy += G_LIQ*DT;
+    else p.vy += G_ICE*DT;
 
-    if(p.state === 'liquid'){
-      p.vx *= LIQ_VX_DAMPING;
-      if(p.vy > VY_MAX_LIQ) p.vy = VY_MAX_LIQ;
-      if(p.vy < -VY_MAX_LIQ) p.vy = -VY_MAX_LIQ;
-    } else if(p.state === 'ice'){
-      p.vx *= ICE_VX_DAMPING;
-      if(p.vy > VY_MAX_ICE) p.vy = VY_MAX_ICE;
-      if(p.vy < -VY_MAX_ICE) p.vy = -VY_MAX_ICE;
-    }
+    if(p.state==='liquid'){ p.vx*=LIQ_DAMPING; p.vz*=LIQ_DAMPING; }
+    else if(p.state==='ice'){ p.vx*=ICE_DAMPING; p.vz*=ICE_DAMPING; }
 
     const v2 = p.speed2;
-    const vmax2 = p.state === 'gas' ? VMAX2_GAS : VMAX2_COND;
-    if(v2 > vmax2){ const s = Math.sqrt(vmax2 / v2); p.vx *= s; p.vy *= s; }
+    const vm2 = p.state==='gas' ? VMAX2_GAS : VMAX2_COND;
+    if(v2 > vm2){ const s = Math.sqrt(vm2/v2); p.vx*=s; p.vy*=s; p.vz*=s; }
 
-    p.x += p.vx * DT;
-    p.y += p.vy * DT;
+    p.x += p.vx*DT;
+    p.y += p.vy*DT;
+    p.z += p.vz*DT;
 
     handleBoundaries(p);
   }
 
   applyThermostat();
 
-  // === АГРЕГАТНЫЕ ПЕРЕХОДЫ (в кельвинах) ===
   for(const p of particles){
-    if(p.state === 'gas'){
-      // КОНДЕНСАЦИЯ: если стена ниже 100 °C (373 K)
+    if(p.state==='gas'){
       if(wallT < T_BOIL_K){
-        const cool = 1 - wallT / T_BOIL_K;   // 0..1
-        const heightFactor = 0.25 + 0.75 * (p.y / H);
-        if(Math.random() < 0.22 * cool * heightFactor){
-          p.state = 'liquid';
-          p.r = R_LIQ;
-          p.mass = MASS * 1.4;
-          p.vx *= 0.2; p.vy *= 0.2;
+        const cool = 1 - wallT/T_BOIL_K;
+        const hf = 0.25 + 0.75 * p.y;
+        if(Math.random() < 0.22*cool*hf){
+          p.state='liquid'; p.r=R_LIQ; p.mass=MASS*1.4;
+          p.vx*=0.2; p.vy*=0.2; p.vz*=0.2;
           wallT += 0.03;
         }
       }
-    } else if(p.state === 'liquid'){
-      // ЗАМЕРЗАНИЕ: если стена ниже 0 °C (273 K)
-      if(wallT < T_FREEZE_K && Math.random() < 0.12){
-        p.state = 'ice';
-      }
-      // ИСПАРЕНИЕ: только если стена РЕАЛЬНО горячее 100 °C
-      if(wallT > T_BOIL_K + 20){
-        const hot = wallT / T_BOIL_K - 1;
-        if(Math.random() < 0.06 * hot){
-          p.state = 'gas';
-          p.r = R_GAS;
-          p.mass = MASS;
-          p.vx = maxwellV(wallT, MASS);
-          p.vy = maxwellV(wallT, MASS);
+    } else if(p.state==='liquid'){
+      if(wallT < T_FREEZE_K && Math.random()<0.12) p.state='ice';
+      if(wallT > T_BOIL_K+20){
+        const hot = wallT/T_BOIL_K - 1;
+        if(Math.random() < 0.06*hot){
+          p.state='gas'; p.r=R_GAS; p.mass=MASS;
+          p.vx = maxwellV(wallT, MASS)*VELOCITY_SCALE;
+          p.vy = maxwellV(wallT, MASS)*VELOCITY_SCALE;
+          p.vz = maxwellV(wallT, MASS)*VELOCITY_SCALE;
         }
       }
-    } else if(p.state === 'ice'){
-      // ТАЯНИЕ: если стена выше 0 °C
-      if(wallT > T_FREEZE_K && Math.random() < 0.08){
-        p.state = 'liquid';
-        p.r = R_LIQ;
-        p.mass = MASS * 1.4;
+    } else if(p.state==='ice'){
+      if(wallT > T_FREEZE_K && Math.random()<0.08){
+        p.state='liquid'; p.r=R_LIQ; p.mass=MASS*1.4;
       }
-      // СУБЛИМАЦИЯ: при сильном нагреве
-      if(wallT > T_BOIL_K + 50 && Math.random() < 0.04){
-        p.state = 'gas';
-        p.r = R_GAS;
-        p.mass = MASS;
-        p.vx = maxwellV(wallT, MASS);
-        p.vy = maxwellV(wallT, MASS);
+      if(wallT > T_BOIL_K+50 && Math.random()<0.04){
+        p.state='gas'; p.r=R_GAS; p.mass=MASS;
+        p.vx = maxwellV(wallT, MASS)*VELOCITY_SCALE;
+        p.vy = maxwellV(wallT, MASS)*VELOCITY_SCALE;
+        p.vz = maxwellV(wallT, MASS)*VELOCITY_SCALE;
       }
     }
   }
 
-  nLiquid = 0; nIce = 0;
-  let sumT = 0, nGas = 0;
+  nLiquid=0; nIce=0;
+  let sumT=0, nGas=0;
   for(const p of particles){
-    if(p.state === 'liquid') nLiquid++;
-    else if(p.state === 'ice') nIce++;
-    else { sumT += p.temp; nGas++; }
+    if(p.state==='liquid') nLiquid++;
+    else if(p.state==='ice') nIce++;
+    else { sumT+=p.temp; nGas++; }
   }
-  avgT = nGas > 0 ? sumT / nGas : 0;
+  avgT = nGas>0 ? sumT/nGas : 0;
 }
 
-// ============ ЦВЕТ ============
-// Цвет — по Цельсию для интуитивности
+// ===== ЦВЕТ =====
 function gasColor(){
   const c = K2C(avgT);
-  // -50 °C → синий, +25 → голубой, +100 → жёлтый, +300 → красный
-  let r, g, b;
-  if(c < 0){
-    const k = Math.max(0, Math.min(1, (c + 50) / 50)); // -50..0 → 0..1
-    r = 40 + 60*k;  g = 80 + 120*k;  b = 255;
-  } else if(c < 100){
-    const k = c / 100;
-    r = 100 + 155*k;  g = 200 - 40*k;  b = 255 - 200*k;
-  } else {
-    const k = Math.min(1, (c - 100) / 200);
-    r = 255;  g = 160 - 140*k;  b = 55 - 40*k;
-  }
-  return [r, g, b];
+  let r,g,b;
+  if(c < 0){ const k = Math.max(0,Math.min(1,(c+50)/50)); r=40+60*k; g=80+120*k; b=255; }
+  else if(c < 100){ const k=c/100; r=100+155*k; g=200-40*k; b=255-200*k; }
+  else { const k=Math.min(1,(c-100)/200); r=255; g=160-140*k; b=55-40*k; }
+  return [r,g,b];
 }
 
-// ============ ОТРИСОВКА ============
+// ===== 3D-КОРОБКА (8 углов) =====
+function drawBox(){
+  const corners = [
+    [0,0,0],[1,0,0],[1,1,0],[0,1,0],
+    [0,0,1],[1,0,1],[1,1,1],[0,1,1],
+  ];
+  const p = corners.map(c => project(c[0], c[1], c[2]));
+
+  const wc = K2C(wallT);
+  let wr,wg,wb;
+  if(wc<0){ const k=Math.max(0,Math.min(1,(wc+50)/50)); wr=40+40*k; wg=80+80*k; wb=220+35*k; }
+  else if(wc<100){ const k=wc/100; wr=80+120*k; wg=160-40*k; wb=255-180*k; }
+  else { const k=Math.min(1,(wc-100)/200); wr=200+55*k; wg=120-100*k; wb=75-50*k; }
+
+  // Задняя грань
+  ctx.strokeStyle = `rgba(${wr*0.4|0},${wg*0.4|0},${wb*0.4|0},0.7)`;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(p[0].sx, p[0].sy);
+  for(let i=1;i<4;i++) ctx.lineTo(p[i].sx, p[i].sy);
+  ctx.closePath();
+  ctx.fillStyle = `rgba(${wr*0.08|0},${wg*0.08|0},${wb*0.08|0},0.5)`;
+  ctx.fill();
+  ctx.stroke();
+
+  // Рёбра
+  ctx.strokeStyle = `rgba(${wr|0},${wg|0},${wb|0},0.5)`;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for(let i=0;i<4;i++){
+    ctx.moveTo(p[i].sx, p[i].sy);
+    ctx.lineTo(p[i+4].sx, p[i+4].sy);
+  }
+  ctx.stroke();
+
+  // Передняя грань
+  ctx.strokeStyle = `rgba(${wr|0},${wg|0},${wb|0},0.9)`;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(p[4].sx, p[4].sy);
+  for(let i=5;i<8;i++) ctx.lineTo(p[i].sx, p[i].sy);
+  ctx.closePath();
+  ctx.stroke();
+}
+
+// ===== ЧАСТИЦЫ =====
+function drawParticles(){
+  const [gr,gg,gb] = gasColor();
+  const vRef = Math.sqrt(3 * kB * Math.max(avgT,1) / MASS) * VELOCITY_SCALE;
+
+  // сортировка по z (дальние сначала)
+  const sorted = particles.slice().sort((a,b) => a.z - b.z);
+
+  for(const p of sorted){
+    const proj = project(p.x, p.y, p.z);
+    const rScreen = p.r * proj.scale * 0.35;
+    if(rScreen < 0.3) continue;
+
+    const depth = p.z;
+    const bright = 0.4 + 0.6 * depth;
+
+    if(p.state==='gas'){
+      const rel = Math.min(1.6, Math.sqrt(p.speed2) / Math.max(1e-9, vRef));
+      const b = bright * (0.7 + 0.3*Math.min(1, rel));
+      ctx.fillStyle = `rgba(${gr*b|0},${gg*b|0},${gb*b|0},${0.55+0.45*depth})`;
+      ctx.beginPath();
+      ctx.arc(proj.sx, proj.sy, rScreen, 0, Math.PI*2);
+      ctx.fill();
+    } else if(p.state==='liquid'){
+      ctx.fillStyle = `rgba(${32*bright|0},${201*bright|0},${160*bright|0},${0.65+0.35*depth})`;
+      ctx.beginPath();
+      ctx.arc(proj.sx, proj.sy, rScreen, 0, Math.PI*2);
+      ctx.fill();
+      ctx.strokeStyle = `rgba(${10*bright|0},${128*bright|0},${96*bright|0},${0.7+0.3*depth})`;
+      ctx.lineWidth = Math.max(1, rScreen*0.2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(proj.sx - rScreen*0.3, proj.sy - rScreen*0.3, rScreen*0.3, 0, Math.PI*2);
+      ctx.fillStyle = `rgba(255,255,255,${0.15+0.25*depth})`;
+      ctx.fill();
+    } else {
+      const size = rScreen * 1.6;
+      ctx.fillStyle = `rgba(${184*bright|0},${224*bright|0},${255*bright|0},${0.7+0.3*depth})`;
+      ctx.fillRect(proj.sx-size/2, proj.sy-size/2, size, size);
+      ctx.strokeStyle = `rgba(255,255,255,${0.4+0.4*depth})`;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(proj.sx-size/2, proj.sy-size/2, size, size);
+    }
+  }
+}
+
 function draw(){
   ctx.fillStyle = '#0a0a14';
   ctx.fillRect(0, 0, W, H);
+  drawBox();
+  drawParticles();
 
-  // стены — цвет по Цельсию
-  const wc = K2C(wallT);
-  let wr, wg, wb;
-  if(wc < 0){
-    const k = Math.max(0, Math.min(1, (wc + 50) / 50));
-    wr = 40 + 40*k;  wg = 80 + 80*k;  wb = 220 + 35*k;
-  } else if(wc < 100){
-    const k = wc / 100;
-    wr = 80 + 120*k;  wg = 160 - 40*k;  wb = 255 - 180*k;
-  } else {
-    const k = Math.min(1, (wc - 100) / 200);
-    wr = 200 + 55*k;  wg = 120 - 100*k;  wb = 75 - 50*k;
-  }
-  ctx.fillStyle = `rgb(${Math.round(wr)},${Math.round(wg)},${Math.round(wb)})`;
-  ctx.fillRect(0, 0, W, WALL);
-  ctx.fillRect(0, H - WALL, W, WALL);
-  ctx.fillRect(0, 0, WALL, H);
-  ctx.fillRect(W - WALL, 0, WALL, H);
-
-  const [gr, gg, gb] = gasColor();
-  const vRef = Math.sqrt(2 * kB * Math.max(avgT, 1) / MASS);
-
-  for(const p of particles){
-    if(p.state === 'gas'){
-      const rel = Math.min(1.6, Math.sqrt(p.speed2) / Math.max(1, vRef));
-      const bright = 0.7 + 0.3 * Math.min(1, rel);
-      ctx.fillStyle = `rgb(${Math.round(gr*bright)},${Math.round(gg*bright)},${Math.round(gb*bright)})`;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-      ctx.fill();
-    } else if(p.state === 'liquid'){
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-      ctx.fillStyle = '#20c9a0';
-      ctx.fill();
-      ctx.lineWidth = 1.5;
-      ctx.strokeStyle = '#0a8060';
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(p.x - p.r*0.3, p.y - p.r*0.3, p.r*0.3, 0, Math.PI*2);
-      ctx.fillStyle = 'rgba(255,255,255,0.35)';
-      ctx.fill();
-    } else {
-      ctx.fillStyle = '#b8e0ff';
-      ctx.fillRect(p.x - p.r, p.y - p.r, p.r*2, p.r*2);
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(p.x - p.r, p.y - p.r, p.r*2, p.r*2);
-    }
-  }
-
-  // === HUD В °C ===
   hud.innerHTML =
     `<b>Стены:</b> ${K2C(wallT).toFixed(1)} °C<br>` +
     `<b>Газ:</b> ${K2C(avgT).toFixed(1)} °C<br>` +
     `<b>Газ:</b> ${particles.length - nLiquid - nIce}<br>` +
     `<b>Жидкость:</b> ${nLiquid}<br>` +
     `<b>Лёд:</b> ${nIce}<br>` +
-    `<b>v<sub>rms</sub>:</b> ${vRef.toFixed(1)}`;
+    `<b>3D:</b> ${particles.length}`;
 
-  // Кнопки и слайдер — тоже в °C
   document.getElementById('tempVal').textContent = K2C(targetT).toFixed(1) + ' °C';
   const frac = (targetT - T_MIN_K) / (T_MAX_K - T_MIN_K);
-  document.getElementById('tempFill').style.width = (Math.max(0, Math.min(1, frac)) * 100) + '%';
+  document.getElementById('tempFill').style.width = (Math.max(0,Math.min(1,frac))*100) + '%';
 }
 
-// ============ ЦИКЛ ============
+// ===== ЦИКЛ =====
 let lastTime = performance.now();
 let acc = 0;
 const FIXED_DT = 1000 / 60;
@@ -523,19 +496,19 @@ function loop(now){
   const dt = Math.min(now - lastTime, 50);
   lastTime = now;
   acc += dt;
-  let iterations = 0;
-  while(acc >= FIXED_DT && iterations < 3){
+  let it = 0;
+  while(acc >= FIXED_DT && it < 3){
     step();
     acc -= FIXED_DT;
-    iterations++;
+    it++;
   }
-  if(iterations === 3) acc = 0;
+  if(it === 3) acc = 0;
   draw();
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
 
-// ============ УПРАВЛЕНИЕ (шаг 5 °C) ============
+// ===== УПРАВЛЕНИЕ =====
 const STEP_C = 5;
 document.getElementById('btnUp').addEventListener('click', () => {
   targetT = Math.min(T_MAX_K, targetT + STEP_C);
