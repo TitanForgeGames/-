@@ -78,10 +78,12 @@ function resize(){
 }
 addEventListener('resize', resize); resize();
 
+// ===== ЕДИНИЦЫ =====
 const K0 = 273.15;
 const K2C = K => K - K0;
 const C2K = C => C + K0;
 
+// ===== КОНСТАНТЫ =====
 const kB = 1.0;
 const MASS = 1.0;
 const T_MIN_K = 50;
@@ -89,22 +91,62 @@ const T_MAX_K = 1000;
 const T_FREEZE_K = C2K(0);
 const T_BOIL_K   = C2K(100);
 
-// ===== 3D-ПРОЕКЦИЯ (простая, надёжная) =====
-// x,y,z ∈ [0..1]. z=0 — далеко, z=1 — близко.
-function project(x, y, z){
-  const scale = 0.45 + z * 0.75;      // 0.45 .. 1.20 — всегда > 0
-  const cx = (x - 0.5) * 2;           // -1..1
-  const cy = (y - 0.5) * 2;           // -1..1
-  const sx = W/2 + cx * (W * 0.38) * scale;
-  const sy = H/2 - cy * (H * 0.38) * scale;
-  return { sx, sy, scale };
+// ===== 3D-КАМЕРА И ВРАЩЕНИЕ =====
+// Куб: x,y,z ∈ [0..1], но для вращения переводим в [-0.5..0.5]
+let rotY = 0.6;      // поворот вокруг вертикальной оси (рад)
+let rotX = -0.15;    // наклон вокруг горизонтальной (рад)
+const FOV = 2.2;     // фокусное расстояние
+
+// Экранные параметры
+function screenScale(){
+  return Math.min(W, H) * 0.55;
 }
 
-// ===== ФИЗИКА (в норм. координатах [0..1]) =====
+// Проекция: точка в кубе [0..1]^3 → экран
+// 1. Центрируем: [0..1] → [-0.5..0.5]
+// 2. Вращаем вокруг Y (rotY), затем вокруг X (rotX)
+// 3. Перспектива
+function project(x, y, z){
+  // В локальных координатах куба, центр = 0
+  let px = x - 0.5;
+  let py = y - 0.5;
+  let pz = z - 0.5;
+
+  // ВАЖНО: y=0 — пол (низ), y=1 — потолок (верх).
+  // На экране: больший y — выше (sy меньше).
+  // Мы не инвертируем здесь — сделаем при выводе sy.
+  // (py = -0.5 внизу, +0.5 вверху)
+
+  // Вращение вокруг Y
+  const cy = Math.cos(rotY), sy_ = Math.sin(rotY);
+  let rx = px * cy + pz * sy_;
+  let rz = -px * sy_ + pz * cy;
+  let ry = py;
+
+  // Вращение вокруг X
+  const cx = Math.cos(rotX), sx_ = Math.sin(rotX);
+  let ry2 = ry * cx - rz * sx_;
+  let rz2 = ry * sx_ + rz * cx;
+
+  // Камера смотрит вдоль +Z, на расстоянии
+  const camDist = 2.5;
+  const zCam = rz2 + camDist;
+
+  // Перспектива
+  const scale = FOV / zCam;
+
+  const S = screenScale();
+  const sx = W/2 + rx * S * scale;
+  // y инвертирован: больше py → выше → меньше sy
+  const sy = H/2 - ry2 * S * scale;
+
+  return { sx, sy, scale, zCam };
+}
+
+// ===== ФИЗИКА =====
 const R_GAS = 5, R_LIQ = 8;
 const VELOCITY_SCALE = 0.005;
 
-// Силы
 const ATTR_EPS_GAS = 0.0008;
 const ATTR_RANGE_GAS = 0.08;
 const REPULSE_K_GAS = 0.004;
@@ -154,7 +196,7 @@ class Particle {
 
 function gauss(mu, sigma){
   const u1 = Math.random() || 1e-9, u2 = Math.random();
-  return mu + sigma * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  return mu + sigma * Math.sqrt(-2*Math.log(u1)) * Math.cos(2*Math.PI*u2);
 }
 function maxwellV(T, mass){
   return gauss(0, Math.sqrt(kB * T / mass));
@@ -179,9 +221,7 @@ spawnParticles(140);
 
 function computeForces(){
   const n = particles.length;
-  for(let i=0; i<n; i++){ 
-    particles[i].fx=0; particles[i].fy=0; particles[i].fz=0;
-  }
+  for(let i=0; i<n; i++){ particles[i].fx=0; particles[i].fy=0; particles[i].fz=0; }
   for(let i=0; i<n; i++){
     const a = particles[i];
     const aCond = a.state !== 'gas';
@@ -197,20 +237,20 @@ function computeForces(){
       const maxRep    = condensed ? MAX_REPULSE_FORCE_LIQ : MAX_REPULSE_FORCE_GAS;
 
       const dx=b.x-a.x, dy=b.y-a.y, dz=b.z-a.z;
-      const d2 = dx*dx + dy*dy + dz*dz;
+      const d2 = dx*dx+dy*dy+dz*dz;
       if(d2 < 1e-12 || d2 > attrRange*attrRange) continue;
 
       const d = Math.sqrt(d2);
       const contact = (a.r + b.r) / 1000;
       let f = 0;
       if(d < contact){
-        f += Math.min(maxRep, repK * (contact - d));
+        f += Math.min(maxRep, repK*(contact-d));
       }
       if(d > contact){
-        const sr2 = (contact*contact) / d2;
+        const sr2 = (contact*contact)/d2;
         const sr6 = sr2*sr2*sr2;
         const sr12 = sr6*sr6;
-        let fLJ = 24 * attrEps / d * (2*sr12 - sr6);
+        let fLJ = 24*attrEps/d*(2*sr12-sr6);
         if(fLJ < -maxAttr) fLJ = -maxAttr;
         if(fLJ >  maxAttr) fLJ =  maxAttr;
         f += fLJ;
@@ -224,27 +264,24 @@ function computeForces(){
 }
 
 function exchangeHeat(a, b){
-  if(a.state !== 'gas' && b.state !== 'gas') return;
-  const Ea = a.mass * a.speed2;
-  const Eb = b.mass * b.speed2;
-  const Eavg = (Ea + Eb) * 0.5;
-  const E_target = 3 * kB * wallT * VELOCITY_SCALE * VELOCITY_SCALE;
-  let na = Ea + (Eavg - Ea) * THERMAL_TRANSFER;
-  let nb = Eb + (Eavg - Eb) * THERMAL_TRANSFER;
-  if(Eavg > E_target * 1.05){
-    na *= 0.98; nb *= 0.98;
-  }
-  if(Ea > 1e-15){ const s = Math.sqrt(na/Ea); a.vx*=s; a.vy*=s; a.vz*=s; }
-  if(Eb > 1e-15){ const s = Math.sqrt(nb/Eb); b.vx*=s; b.vy*=s; b.vz*=s; }
+  if(a.state!=='gas' && b.state!=='gas') return;
+  const Ea = a.mass*a.speed2, Eb = b.mass*b.speed2;
+  const Eavg = (Ea+Eb)*0.5;
+  const E_target = 3*kB*wallT*VELOCITY_SCALE*VELOCITY_SCALE;
+  let na = Ea + (Eavg-Ea)*THERMAL_TRANSFER;
+  let nb = Eb + (Eavg-Eb)*THERMAL_TRANSFER;
+  if(Eavg > E_target*1.05){ na*=0.98; nb*=0.98; }
+  if(Ea>1e-15){ const s=Math.sqrt(na/Ea); a.vx*=s; a.vy*=s; a.vz*=s; }
+  if(Eb>1e-15){ const s=Math.sqrt(nb/Eb); b.vx*=s; b.vy*=s; b.vz*=s; }
 }
 
 function applyThermostat(){
   let sum=0, cnt=0;
   for(const p of particles){ if(p.state==='gas'){ sum+=p.speed2; cnt++; } }
-  if(cnt===0 || sum<1e-15) return;
+  if(cnt===0||sum<1e-15) return;
   const avg2 = sum/cnt;
-  const target2 = 3 * kB * wallT * VELOCITY_SCALE * VELOCITY_SCALE / MASS;
-  const lambda = Math.sqrt(1 + THERMOSTAT_STRENGTH * (target2/avg2 - 1));
+  const target2 = 3*kB*wallT*VELOCITY_SCALE*VELOCITY_SCALE/MASS;
+  const lambda = Math.sqrt(1 + THERMOSTAT_STRENGTH*(target2/avg2 - 1));
   for(const p of particles){
     if(p.state==='gas'){ p.vx*=lambda; p.vy*=lambda; p.vz*=lambda; }
   }
@@ -258,30 +295,37 @@ function reflectFromWall(p, nx, ny, nz){
   const vnNew = -vn;
   const tMag = Math.sqrt(tx*tx+ty*ty+tz*tz);
   const targetT = Math.abs(maxwellV(wallT, p.mass)) * VELOCITY_SCALE;
-  const tNewMag = tMag + (targetT - tMag) * WALL_CONDUCTIVITY;
+  const tNewMag = tMag + (targetT-tMag)*WALL_CONDUCTIVITY;
   let k = 1;
-  if(tMag > 1e-15) k = tNewMag / tMag;
+  if(tMag > 1e-15) k = tNewMag/tMag;
   p.vx = vnNew*nx + tx*k;
   p.vy = vnNew*ny + ty*k;
   p.vz = vnNew*nz + tz*k;
 }
 
 function handleBoundaries(p){
-  const m = p.r / 1000;
-  if(p.x < m){ p.x = m; if(p.state==='gas') reflectFromWall(p,1,0,0); else p.vx = Math.abs(p.vx)*0.3; }
-  else if(p.x > 1-m){ p.x = 1-m; if(p.state==='gas') reflectFromWall(p,-1,0,0); else p.vx = -Math.abs(p.vx)*0.3; }
-  if(p.z < m){ p.z = m; if(p.state==='gas') reflectFromWall(p,0,0,1); else p.vz = Math.abs(p.vz)*0.3; }
-  else if(p.z > 1-m){ p.z = 1-m; if(p.state==='gas') reflectFromWall(p,0,0,-1); else p.vz = -Math.abs(p.vz)*0.3; }
-  if(p.y < m){ p.y = m; if(p.state==='gas') reflectFromWall(p,0,1,0); else p.vy = Math.abs(p.vy)*0.3; }
+  const m = p.r/1000;
+  // x
+  if(p.x < m){ p.x=m; if(p.state==='gas') reflectFromWall(p,1,0,0); else p.vx=Math.abs(p.vx)*0.3; }
+  else if(p.x > 1-m){ p.x=1-m; if(p.state==='gas') reflectFromWall(p,-1,0,0); else p.vx=-Math.abs(p.vx)*0.3; }
+  // z
+  if(p.z < m){ p.z=m; if(p.state==='gas') reflectFromWall(p,0,0,1); else p.vz=Math.abs(p.vz)*0.3; }
+  else if(p.z > 1-m){ p.z=1-m; if(p.state==='gas') reflectFromWall(p,0,0,-1); else p.vz=-Math.abs(p.vz)*0.3; }
+  // y — пол (y=0) и потолок (y=1)
+  if(p.y < m){
+    p.y = m;
+    if(p.state==='gas') reflectFromWall(p,0,1,0);
+    else p.vy = Math.abs(p.vy)*0.3;   // жидкость/лёд на полу
+  }
   if(p.y > 1-m){
     p.y = 1-m;
     if(p.state==='gas') reflectFromWall(p,0,-1,0);
-    else { p.vy = -Math.abs(p.vy)*0.05; p.vx*=0.85; p.vz*=0.85; }
+    else p.vy = -Math.abs(p.vy)*0.3;
   }
 }
 
 function step(){
-  wallT += (targetT - wallT) * 0.05;
+  wallT += (targetT-wallT)*0.05;
   computeForces();
 
   const n = particles.length;
@@ -298,20 +342,20 @@ function step(){
   }
 
   for(const p of particles){
-    p.vx += (p.fx/p.mass) * DT;
-    p.vy += (p.fy/p.mass) * DT;
-    p.vz += (p.fz/p.mass) * DT;
+    p.vx += (p.fx/p.mass)*DT;
+    p.vy += (p.fy/p.mass)*DT;
+    p.vz += (p.fz/p.mass)*DT;
 
-    if(p.state==='gas') p.vy += G_GAS*DT;
-    else if(p.state==='liquid') p.vy += G_LIQ*DT;
-    else p.vy += G_ICE*DT;
+    if(p.state==='gas') p.vy -= G_GAS*DT;        // газ почти невесом
+    else if(p.state==='liquid') p.vy -= G_LIQ*DT; // жидкость падает вниз
+    else p.vy -= G_ICE*DT;                       // лёд падает ещё сильнее
 
     if(p.state==='liquid'){ p.vx*=LIQ_DAMPING; p.vz*=LIQ_DAMPING; }
     else if(p.state==='ice'){ p.vx*=ICE_DAMPING; p.vz*=ICE_DAMPING; }
 
     const v2 = p.speed2;
     const vm2 = p.state==='gas' ? VMAX2_GAS : VMAX2_COND;
-    if(v2 > vm2){ const s = Math.sqrt(vm2/v2); p.vx*=s; p.vy*=s; p.vz*=s; }
+    if(v2>vm2){ const s=Math.sqrt(vm2/v2); p.vx*=s; p.vy*=s; p.vz*=s; }
 
     p.x += p.vx*DT;
     p.y += p.vy*DT;
@@ -326,7 +370,8 @@ function step(){
     if(p.state==='gas'){
       if(wallT < T_BOIL_K){
         const cool = 1 - wallT/T_BOIL_K;
-        const hf = 0.25 + 0.75 * p.y;
+        // Вероятность выше у пола (y=0) и ниже у потолка (y=1)
+        const hf = 1 - p.y * 0.75;   // у пола 1.0, у потолка 0.25
         if(Math.random() < 0.22*cool*hf){
           p.state='liquid'; p.r=R_LIQ; p.mass=MASS*1.4;
           p.vx*=0.2; p.vy*=0.2; p.vz*=0.2;
@@ -339,9 +384,9 @@ function step(){
         const hot = wallT/T_BOIL_K - 1;
         if(Math.random() < 0.06*hot){
           p.state='gas'; p.r=R_GAS; p.mass=MASS;
-          p.vx = maxwellV(wallT, MASS)*VELOCITY_SCALE;
-          p.vy = maxwellV(wallT, MASS)*VELOCITY_SCALE;
-          p.vz = maxwellV(wallT, MASS)*VELOCITY_SCALE;
+          p.vx = maxwellV(wallT,MASS)*VELOCITY_SCALE;
+          p.vy = maxwellV(wallT,MASS)*VELOCITY_SCALE;
+          p.vz = maxwellV(wallT,MASS)*VELOCITY_SCALE;
         }
       }
     } else if(p.state==='ice'){
@@ -350,9 +395,9 @@ function step(){
       }
       if(wallT > T_BOIL_K+50 && Math.random()<0.04){
         p.state='gas'; p.r=R_GAS; p.mass=MASS;
-        p.vx = maxwellV(wallT, MASS)*VELOCITY_SCALE;
-        p.vy = maxwellV(wallT, MASS)*VELOCITY_SCALE;
-        p.vz = maxwellV(wallT, MASS)*VELOCITY_SCALE;
+        p.vx = maxwellV(wallT,MASS)*VELOCITY_SCALE;
+        p.vy = maxwellV(wallT,MASS)*VELOCITY_SCALE;
+        p.vz = maxwellV(wallT,MASS)*VELOCITY_SCALE;
       }
     }
   }
@@ -371,19 +416,31 @@ function step(){
 function gasColor(){
   const c = K2C(avgT);
   let r,g,b;
-  if(c < 0){ const k = Math.max(0,Math.min(1,(c+50)/50)); r=40+60*k; g=80+120*k; b=255; }
-  else if(c < 100){ const k=c/100; r=100+155*k; g=200-40*k; b=255-200*k; }
+  if(c<0){ const k=Math.max(0,Math.min(1,(c+50)/50)); r=40+60*k; g=80+120*k; b=255; }
+  else if(c<100){ const k=c/100; r=100+155*k; g=200-40*k; b=255-200*k; }
   else { const k=Math.min(1,(c-100)/200); r=255; g=160-140*k; b=55-40*k; }
   return [r,g,b];
 }
 
-// ===== 3D-КОРОБКА (8 углов) =====
-function drawBox(){
-  const corners = [
-    [0,0,0],[1,0,0],[1,1,0],[0,1,0],
-    [0,0,1],[1,0,1],[1,1,1],[0,1,1],
-  ];
-  const p = corners.map(c => project(c[0], c[1], c[2]));
+// ===== КУБ (12 рёбер, 8 углов) =====
+// Углы в локальных координатах [0..1]^3.
+// y=0 — пол, y=1 — потолок.
+const CUBE_CORNERS = [
+  [0,0,0],[1,0,0],[1,0,1],[0,0,1],   // нижняя грань (пол)
+  [0,1,0],[1,1,0],[1,1,1],[0,1,1],   // верхняя грань (потолок)
+];
+// Рёбра: пары индексов
+const CUBE_EDGES = [
+  // нижняя грань
+  [0,1],[1,2],[2,3],[3,0],
+  // верхняя грань
+  [4,5],[5,6],[6,7],[7,4],
+  // вертикальные
+  [0,4],[1,5],[2,6],[3,7],
+];
+
+function drawCube(){
+  const p = CUBE_CORNERS.map(c => project(c[0], c[1], c[2]));
 
   const wc = K2C(wallT);
   let wr,wg,wb;
@@ -391,56 +448,55 @@ function drawBox(){
   else if(wc<100){ const k=wc/100; wr=80+120*k; wg=160-40*k; wb=255-180*k; }
   else { const k=Math.min(1,(wc-100)/200); wr=200+55*k; wg=120-100*k; wb=75-50*k; }
 
-  // Задняя грань
-  ctx.strokeStyle = `rgba(${wr*0.4|0},${wg*0.4|0},${wb*0.4|0},0.7)`;
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  ctx.moveTo(p[0].sx, p[0].sy);
-  for(let i=1;i<4;i++) ctx.lineTo(p[i].sx, p[i].sy);
-  ctx.closePath();
-  ctx.fillStyle = `rgba(${wr*0.08|0},${wg*0.08|0},${wb*0.08|0},0.5)`;
-  ctx.fill();
-  ctx.stroke();
-
-  // Рёбра
-  ctx.strokeStyle = `rgba(${wr|0},${wg|0},${wb|0},0.5)`;
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  for(let i=0;i<4;i++){
-    ctx.moveTo(p[i].sx, p[i].sy);
-    ctx.lineTo(p[i+4].sx, p[i+4].sy);
+  // Заливка задней грани? Нет — рисуем только рёбра.
+  // Рисуем все 12 рёбер, но с разной яркостью в зависимости от средней глубины.
+  ctx.lineCap = 'round';
+  for(const [i,j] of CUBE_EDGES){
+    const a = p[i], b = p[j];
+    const zAvg = (a.zCam + b.zCam) / 2;
+    // Чем дальше (больше zCam) — тем тусклее
+    const bright = Math.max(0.35, Math.min(1, 1.4 - zAvg * 0.25));
+    ctx.strokeStyle = `rgba(${wr*bright|0},${wg*bright|0},${wb*bright|0},${0.5 + 0.5*bright})`;
+    ctx.lineWidth = 1.5 + bright * 1.2;
+    ctx.beginPath();
+    ctx.moveTo(a.sx, a.sy);
+    ctx.lineTo(b.sx, b.sy);
+    ctx.stroke();
   }
-  ctx.stroke();
 
-  // Передняя грань
-  ctx.strokeStyle = `rgba(${wr|0},${wg|0},${wb|0},0.9)`;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(p[4].sx, p[4].sy);
-  for(let i=5;i<8;i++) ctx.lineTo(p[i].sx, p[i].sy);
-  ctx.closePath();
-  ctx.stroke();
+  // Подписи «ПОЛ» и «ПОТОЛОК» (опционально, для наглядности)
+  // Углы: пол — центр нижней грани, потолок — центр верхней
+  const floorCenter = project(0.5, 0, 0.5);
+  const ceilCenter  = project(0.5, 1, 0.5);
+  ctx.font = '11px monospace';
+  ctx.fillStyle = 'rgba(200,220,255,0.5)';
+  ctx.textAlign = 'center';
+  ctx.fillText('ПОЛ', floorCenter.sx, floorCenter.sy + 14);
+  ctx.fillText('ПОТОЛОК', ceilCenter.sx, ceilCenter.sy - 8);
+  ctx.textAlign = 'left';
 }
 
 // ===== ЧАСТИЦЫ =====
 function drawParticles(){
   const [gr,gg,gb] = gasColor();
-  const vRef = Math.sqrt(3 * kB * Math.max(avgT,1) / MASS) * VELOCITY_SCALE;
+  const vRef = Math.sqrt(3*kB*Math.max(avgT,1)/MASS) * VELOCITY_SCALE;
 
-  // сортировка по z (дальние сначала)
-  const sorted = particles.slice().sort((a,b) => a.z - b.z);
+  // Проецируем и сортируем по zCam (дальние сначала)
+  const list = particles.map(p => ({ p, proj: project(p.x, p.y, p.z) }));
+  list.sort((a,b) => b.proj.zCam - a.proj.zCam);
 
-  for(const p of sorted){
-    const proj = project(p.x, p.y, p.z);
+  for(const {p, proj} of list){
     const rScreen = p.r * proj.scale * 0.35;
     if(rScreen < 0.3) continue;
 
-    const depth = p.z;
-    const bright = 0.4 + 0.6 * depth;
+    // Глубина: zCam больше → дальше
+    // Нормируем: 0 = далеко, 1 = близко
+    const depth = Math.max(0, Math.min(1, 1.5 - proj.zCam * 0.35));
+    const bright = 0.4 + 0.6*depth;
 
     if(p.state==='gas'){
-      const rel = Math.min(1.6, Math.sqrt(p.speed2) / Math.max(1e-9, vRef));
-      const b = bright * (0.7 + 0.3*Math.min(1, rel));
+      const rel = Math.min(1.6, Math.sqrt(p.speed2)/Math.max(1e-9,vRef));
+      const b = bright*(0.7+0.3*Math.min(1,rel));
       ctx.fillStyle = `rgba(${gr*b|0},${gg*b|0},${gb*b|0},${0.55+0.45*depth})`;
       ctx.beginPath();
       ctx.arc(proj.sx, proj.sy, rScreen, 0, Math.PI*2);
@@ -453,12 +509,8 @@ function drawParticles(){
       ctx.strokeStyle = `rgba(${10*bright|0},${128*bright|0},${96*bright|0},${0.7+0.3*depth})`;
       ctx.lineWidth = Math.max(1, rScreen*0.2);
       ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(proj.sx - rScreen*0.3, proj.sy - rScreen*0.3, rScreen*0.3, 0, Math.PI*2);
-      ctx.fillStyle = `rgba(255,255,255,${0.15+0.25*depth})`;
-      ctx.fill();
     } else {
-      const size = rScreen * 1.6;
+      const size = rScreen*1.6;
       ctx.fillStyle = `rgba(${184*bright|0},${224*bright|0},${255*bright|0},${0.7+0.3*depth})`;
       ctx.fillRect(proj.sx-size/2, proj.sy-size/2, size, size);
       ctx.strokeStyle = `rgba(255,255,255,${0.4+0.4*depth})`;
@@ -468,10 +520,12 @@ function drawParticles(){
   }
 }
 
+// ===== ОТРИСОВКА =====
 function draw(){
   ctx.fillStyle = '#0a0a14';
   ctx.fillRect(0, 0, W, H);
-  drawBox();
+
+  drawCube();
   drawParticles();
 
   hud.innerHTML =
@@ -480,7 +534,7 @@ function draw(){
     `<b>Газ:</b> ${particles.length - nLiquid - nIce}<br>` +
     `<b>Жидкость:</b> ${nLiquid}<br>` +
     `<b>Лёд:</b> ${nIce}<br>` +
-    `<b>3D:</b> ${particles.length}`;
+    `<b>Поворот:</b> ${(rotY*180/Math.PI).toFixed(0)}°`;
 
   document.getElementById('tempVal').textContent = K2C(targetT).toFixed(1) + ' °C';
   const frac = (targetT - T_MIN_K) / (T_MAX_K - T_MIN_K);
@@ -490,25 +544,23 @@ function draw(){
 // ===== ЦИКЛ =====
 let lastTime = performance.now();
 let acc = 0;
-const FIXED_DT = 1000 / 60;
+const FIXED_DT = 1000/60;
 
 function loop(now){
-  const dt = Math.min(now - lastTime, 50);
+  const dt = Math.min(now-lastTime, 50);
   lastTime = now;
   acc += dt;
   let it = 0;
   while(acc >= FIXED_DT && it < 3){
-    step();
-    acc -= FIXED_DT;
-    it++;
+    step(); acc -= FIXED_DT; it++;
   }
-  if(it === 3) acc = 0;
+  if(it===3) acc = 0;
   draw();
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
 
-// ===== УПРАВЛЕНИЕ =====
+// ===== УПРАВЛЕНИЕ ТЕМПЕРАТУРОЙ =====
 const STEP_C = 5;
 document.getElementById('btnUp').addEventListener('click', () => {
   targetT = Math.min(T_MAX_K, targetT + STEP_C);
@@ -522,6 +574,44 @@ document.querySelectorAll('.preset').forEach(btn => {
     targetT = Math.max(T_MIN_K, Math.min(T_MAX_K, C2K(c)));
   });
 });
+
+// ===== ВРАЩЕНИЕ СВАЙПОМ / МЫШЬЮ =====
+let dragging = false;
+let lastX = 0, lastY = 0;
+
+function onDown(x, y){
+  // Не перехватываем касания по кнопкам управления
+  if(y > H - 120) return;
+  dragging = true;
+  lastX = x; lastY = y;
+}
+function onMove(x, y){
+  if(!dragging) return;
+  const dx = x - lastX;
+  const dy = y - lastY;
+  rotY += dx * 0.01;
+  rotX += dy * 0.005;
+  // Ограничим наклон
+  rotX = Math.max(-0.8, Math.min(0.8, rotX));
+  lastX = x; lastY = y;
+}
+function onUp(){ dragging = false; }
+
+// Touch
+canvas.addEventListener('touchstart', e => {
+  const t = e.touches[0];
+  onDown(t.clientX, t.clientY);
+}, {passive:true});
+canvas.addEventListener('touchmove', e => {
+  const t = e.touches[0];
+  onMove(t.clientX, t.clientY);
+}, {passive:true});
+canvas.addEventListener('touchend', onUp, {passive:true});
+
+// Mouse
+canvas.addEventListener('mousedown', e => onDown(e.clientX, e.clientY));
+addEventListener('mousemove', e => onMove(e.clientX, e.clientY));
+addEventListener('mouseup', onUp);
 </script>
 </body>
 </html>
